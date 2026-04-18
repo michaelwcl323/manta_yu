@@ -264,11 +264,11 @@ def cloudlab_wan(ctx, action='setup', settings_file='cloudlab_settings.json'):
 @task
 def cloudlab_remote(
     ctx,
-    debug=False,
+    debug=True,
     sigma=1,
     kappa=2,
-    reference=4,
-    coverage=4,
+    reference=7,
+    coverage=7,
 
 
     allow_cross_step_weak_edges=False,  # 跨solid-step的weak edges
@@ -296,7 +296,7 @@ def cloudlab_remote(
 
     attack_enabled=True,
     attack_start_secs=80,
-    attack_duration_secs=5,
+    attack_duration_secs=10,
     attack_group_size=5,
     attack_limit_headers=False,
     attack_limit_certificates=True,
@@ -309,9 +309,9 @@ def cloudlab_remote(
     #会根据这些tag会自动生成目录，将运行结果分类 目录是 design_tag/network_tag/load_tag/
     design_tag='experiment2_attack',
     network_tag='geo',
-    load_tag='balanced_50_50',
+    load_tag='kappa=2_reference=7',
 ):
-    ''' Run benchmarks on CloudLab '''
+    '''Run benchmarks on CloudLab (boot order: client → worker → primary last).'''
     allow_cross_step_weak_edges = _coerce_bool(allow_cross_step_weak_edges)
     enable_fast_coin = _coerce_bool(enable_fast_coin)
     solid_commit_trigger_on_solid_step = _coerce_bool(solid_commit_trigger_on_solid_step)

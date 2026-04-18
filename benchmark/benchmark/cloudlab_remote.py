@@ -14,9 +14,12 @@ from paramiko.ssh_exception import PasswordRequiredException, SSHException
 from time import sleep
 from math import ceil
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import re
 import shlex
+import sys
+import json
 
 from benchmark.config import Committee, Key, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker
@@ -24,6 +27,55 @@ from benchmark.commands import CommandMaker
 from benchmark.logs import LogParser, ParseError
 from benchmark.cloudlab_instance import CloudLabInstanceManager
 from benchmark.imbalanced_rate import ZipfAllocator
+
+
+def _run_latency_plot_script(run_dir: str) -> None:
+    """Generate ``attack_latency_timeseries.png`` for this run (needs ``latency.csv`` + metadata)."""
+    rd = Path(run_dir).resolve()
+    latency = rd / 'latency.csv'
+    if not latency.is_file():
+        Print.warn(f'Skipping latency plot (no {latency}).')
+        return
+    benchmark_dir = Path(__file__).resolve().parent.parent
+    script = benchmark_dir / 'plot_attack_latency_timeseries.py'
+    if not script.is_file():
+        Print.warn(f'Skipping latency plot (missing {script}).')
+        return
+    meta_path = rd / 'run_metadata.json'
+    title = 'Rolling p95 consensus latency vs execution time'
+    try:
+        if meta_path.is_file():
+            meta = json.loads(meta_path.read_text())
+            title = (meta.get('label') or '').strip() or title
+    except (OSError, json.JSONDecodeError):
+        pass
+    out = rd / 'attack_latency_timeseries.png'
+    cmd = [
+        sys.executable,
+        str(script),
+        '--input-dir',
+        str(rd),
+        '--output',
+        str(out),
+        '--title',
+        title,
+        '--time-axis',
+        'commit',
+    ]
+    Print.info('Generating attack_latency_timeseries.png...')
+    proc = subprocess.run(cmd, cwd=str(benchmark_dir), capture_output=True, text=True)
+    if proc.returncode != 0:
+        Print.warn(
+            f'Latency plot failed (exit {proc.returncode}): '
+            f'{proc.stderr or proc.stdout or "no output"}'
+        )
+    else:
+        Print.info(f'Latency plot written to {out}')
+        raw_line = rd / 'latency_execution_line.png'
+        if raw_line.is_file():
+            Print.info(f'Per-sample latency line plot written to {raw_line}')
+        if proc.stdout.strip():
+            Print.info(proc.stdout.strip())
 
 
 class FabricError(Exception):
@@ -200,7 +252,14 @@ class CloudLabBench:
             # Add cargo to PATH permanently
             'echo "export PATH=\\$HOME/.cargo/bin:\\$PATH" >> $HOME/.bashrc',
             'echo "export PATH=\\$HOME/.cargo/bin:\\$PATH" >> $HOME/.profile',
-            f'(git clone {self.settings.repo_url} || (cd {self.settings.repo_name} ; git pull))',
+            # Clone into repo_name from settings (URL basename may differ, e.g. manta_yu vs manta_attack).
+            # If the directory already exists, update in place so re-install does not rely on a mismatched cd.
+            (
+                f'if [ -d {self.settings.repo_name}/.git ]; then '
+                f'cd {self.settings.repo_name} && git remote set-url origin {self.settings.repo_url} && '
+                f'git fetch origin && git checkout {self.settings.branch} && git pull origin {self.settings.branch}; '
+                f'else git clone -b {self.settings.branch} {self.settings.repo_url} {self.settings.repo_name}; fi'
+            ),
             f'cd {self.settings.repo_name}/benchmark && pip3 install -r requirements.txt'
         ]
         
@@ -1421,7 +1480,7 @@ SCRIPTEOF'''
         return None
     
     def _run_single(self, rate, committee, bench_parameters, node_parameters, selected_hosts, debug=False):
-        """Run a single benchmark iteration (CloudLab), mirroring logic from Bench._run_single"""
+        """Run one CloudLab iteration: clients, then workers, then primaries (primary last)."""
         from time import sleep
 
         faults = bench_parameters.faults
@@ -1436,8 +1495,7 @@ SCRIPTEOF'''
         # Pre-compute workers' addresses (filtered for faults) – same as Bench._run_single
         workers_addresses = committee.workers_addresses(faults)
 
-        # 2. Run the clients first (they will wait for the nodes to be ready)
-        #    This mirrors benchmark/benchmark/remote.py::_run_single
+        # 2. Clients first (they block until the node is reachable / ready to accept load).
         Print.info('Booting clients...')
         workers_total = committee.workers()
         if bench_parameters.rate_type == 'balanced':
@@ -1480,25 +1538,7 @@ SCRIPTEOF'''
                 self._background_run(host_info, cmd, log_file)
                 worker_index += 1
 
-        # 3. Run the primaries (except the faulty ones) – same order as Bench._run_single
-        Print.info('Booting primaries...')
-        for i, address in enumerate(committee.primary_addresses(faults)):
-            host_info = self._get_host_by_address(address, selected_hosts)
-            if not host_info:
-                Print.warn(f'Could not find host for address {address}')
-                continue
-
-            cmd = CommandMaker.run_primary(
-                PathMaker.key_file(i),
-                PathMaker.committee_file(),
-                PathMaker.db_path(i),
-                PathMaker.parameters_file(),
-                debug=debug
-            )
-            log_file = PathMaker.primary_log_file(i)
-            self._background_run(host_info, cmd, log_file)
-
-        # 4. Run the workers (except the faulty ones) – same as Bench._run_single
+        # 3. Workers before primaries so workers are listening when the primary starts.
         Print.info('Booting workers...')
         for i, addresses in enumerate(workers_addresses):
             for (id, address) in addresses:
@@ -1517,6 +1557,36 @@ SCRIPTEOF'''
                 )
                 log_file = PathMaker.worker_log_file(i, id)
                 self._background_run(host_info, cmd, log_file)
+
+        # 4. Primaries last (CloudLab): start all primaries in parallel so boot_instant / log
+        #    wall times are as aligned as SSH allows (sequential starts skew attack windows).
+        Print.info(f'Booting {len(committee.primary_addresses(faults))} primaries in parallel...')
+        primary_jobs: list[tuple] = []
+        for i, address in enumerate(committee.primary_addresses(faults)):
+            host_info = self._get_host_by_address(address, selected_hosts)
+            if not host_info:
+                Print.warn(f'Could not find host for address {address}')
+                continue
+
+            cmd = CommandMaker.run_primary(
+                PathMaker.key_file(i),
+                PathMaker.committee_file(),
+                PathMaker.db_path(i),
+                PathMaker.parameters_file(),
+                debug=debug
+            )
+            log_file = PathMaker.primary_log_file(i)
+            primary_jobs.append((host_info, cmd, log_file))
+
+        if primary_jobs:
+            max_parallel = min(32, len(primary_jobs))
+            with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+                futures = [
+                    pool.submit(self._background_run, h, c, lf)
+                    for h, c, lf in primary_jobs
+                ]
+                for fut in as_completed(futures):
+                    fut.result()
 
         # 5. Wait for all transactions to be processed (progress output)
         duration = bench_parameters.duration
@@ -1691,6 +1761,7 @@ SCRIPTEOF'''
                                 max_workers=bench_parameters.workers,
                             )
                             PathMaker.export_run_artifacts()
+                            _run_latency_plot_script(run_dir)
                         except (subprocess.SubprocessError, GroupException, ParseError) as e:
                             self.kill(hosts=selected_hosts)
                             if isinstance(e, GroupException):

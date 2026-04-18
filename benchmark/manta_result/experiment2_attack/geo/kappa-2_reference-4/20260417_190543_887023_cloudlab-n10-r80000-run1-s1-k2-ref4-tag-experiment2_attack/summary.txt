@@ -1,0 +1,56 @@
+Benchmark Results - 2026-04-17 13:08:33
+============================================================
+
+-----------------------------------------
+ SUMMARY:
+-----------------------------------------
+ + CONFIG:
+ Faults: 0 node(s)
+ Committee size: 10 node(s)
+ Worker(s) per node: 1 worker(s)
+ Collocate primary and workers: True
+ Input rate: 80,000 tx/s
+ Transaction size: 512 B
+ Execution time: 119 s (same T0 as latency.csv / plots; see run_metadata execution_time_*)
+
+ Header size: 1,000 B
+ Max header delay: 50 ms
+ GC depth: 50 round(s)
+ Sync retry delay: 1,000 ms
+ Sync retry nodes: 7 node(s)
+ batch size: 500,000 B
+ Max batch delay: 50 ms
+ Execution time T0 (unix): 1776452781.862
+ Execution time end (unix): 1776452901.353
+ Sigma: 1
+ Kappa: 2
+ Reference: 4
+ Coverage: 4
+ Allow cross-step weak edges: False
+ Enable fast coin: False
+ Solid commit trigger on solid step: False
+ Enable commit recheck: False
+ Fast coin candidate threshold: 0
+ Solid candidate threshold: 0
+ Attack enabled: True
+ Attack start seconds: 80
+ Attack duration seconds: 10
+ Attack group size: 5
+ Attack limit headers: False
+ Attack limit certificates: True
+ Enable adaptive intermediate spill: False
+ Adaptive intermediate spill trigger digests: 2
+ Adaptive intermediate spill cap digests: 1
+ Design tag: experiment2_attack
+ Network tag: geo
+ Load tag: kappa=2_reference=4
+
+ + RESULTS:
+ Consensus TPS: 74,350 tx/s
+ Consensus BPS: 38,067,310 B/s
+ Consensus latency: 131 ms
+
+ End-to-end TPS: 74,358 tx/s
+ End-to-end BPS: 38,071,451 B/s
+ End-to-end latency: 490 ms
+-----------------------------------------

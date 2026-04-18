@@ -15,6 +15,38 @@ class ParseError(Exception):
     pass
 
 
+def parse_primary_boot_wall_time(log: str):
+    """Parse wall-clock time of ``Primary … successfully booted on`` (env_logger formats).
+
+    Matches ``node`` default logging with ``format_timestamp_millis()`` (fractional seconds,
+    often without a trailing ``Z`` in the timestamp token).
+    """
+    for line in log.splitlines():
+        if 'successfully booted on' not in line or 'Primary' not in line:
+            continue
+        inner = search(r'\[([^\]]+)\]', line)
+        if not inner:
+            continue
+        head = inner.group(1)
+        ts_token = (
+            head.split(' INFO', 1)[0]
+            .split(' WARN', 1)[0]
+            .split(' ERROR', 1)[0]
+            .split(' DEBUG', 1)[0]
+            .split(' TRACE', 1)[0]
+            .strip()
+        )
+        ts_norm = ts_token.replace(' ', 'T')
+        if not ts_norm:
+            continue
+        try:
+            x = datetime.fromisoformat(ts_norm.replace('Z', '+00:00'))
+            return datetime.timestamp(x)
+        except ValueError:
+            continue
+    return None
+
+
 class LogParser:
     def __init__(self, clients, primaries, workers, faults=0,
                  default_client_size=None, default_client_rates=None):
@@ -63,9 +95,10 @@ class LogParser:
                 results = p.map(self._parse_primaries, primaries)
         except (ValueError, IndexError, AttributeError) as e:
             raise ParseError(f'Failed to parse nodes\' logs: {e}')
-        proposals, commits, self.configs, primary_ips = zip(*results)
+        proposals, commits, self.configs, primary_ips, primary_boots = zip(*results)
         self.proposals = self._merge_results([x.items() for x in proposals])
         self.commits = self._merge_results([x.items() for x in commits])
+        self.primary_boot_times = list(primary_boots)
 
         # Parse the workers logs.
         try:
@@ -153,8 +186,10 @@ class LogParser:
         }
 
         ip = search(r'booted on (\d+.\d+.\d+.\d+)', log).group(1)
-        
-        return proposals, commits, configs, ip
+
+        primary_boot_ts = parse_primary_boot_wall_time(log)
+
+        return proposals, commits, configs, ip, primary_boot_ts
 
     def _parse_workers(self, log):
         if search(r'(?:panic|Error)', log) is not None:
@@ -202,21 +237,49 @@ class LogParser:
         ]
         return mean(latency) if latency else 0
 
-    def _end_to_end_throughput(self):
+    def execution_origin_unix(self):
+        """Wall-clock max primary ``successfully booted`` time (subset of execution T0 logic)."""
+        boots = [t for t in self.primary_boot_times if t is not None]
+        if not boots:
+            return None
+        return max(boots)
+
+    def execution_time_window(self):
+        """``(start_unix, end_unix, duration_s)`` — same window as Summary *Execution time* / E2E TPS.
+
+        ``start_unix`` is the single source of truth for ``relative_time_s`` in ``latency.csv`` and
+        for latency plot axes (``execution_time_start_unix`` in ``run_metadata.json``).
+        """
         batch_ids = self._committed_batch_ids()
         if not batch_ids:
-            return 0, 0, 0
-        start_candidates = [x for x in self.start if x is not None]
-        if start_candidates:
-            start = min(start_candidates)
+            return None
+        end = max(self.commits[digest] for digest in batch_ids)
+        primary_start = self.execution_origin_unix()
+        proposal_times = [
+            self.proposals[d]
+            for d in batch_ids
+            if d in self.proposals
+        ]
+        chain_start = min(proposal_times) if proposal_times else None
+        if primary_start is not None:
+            start = primary_start
+        elif chain_start is not None:
+            start = chain_start
         else:
-            proposal_batch_ids = self._committed_batch_ids(require_proposal=True)
-            if proposal_batch_ids:
-                start = min(self.proposals[digest] for digest in proposal_batch_ids)
+            start_candidates = [x for x in self.start if x is not None]
+            if start_candidates:
+                start = min(start_candidates)
             else:
                 start = min(self.commits[digest] for digest in batch_ids)
-        end = max(self.commits[digest] for digest in batch_ids)
         duration = max(end - start, 1e-9)
+        return float(start), float(end), float(duration)
+
+    def _end_to_end_throughput(self):
+        w = self.execution_time_window()
+        if not w:
+            return 0, 0, 0
+        start, end, duration = w
+        batch_ids = self._committed_batch_ids()
         bytes = sum(self.sizes[digest] for digest in batch_ids)
         bps = bytes / duration
         tps = bps / self.size[0]
@@ -266,6 +329,11 @@ class LogParser:
         node_params = run_metadata.get('node_params', {})
 
         extra_config_lines = ''
+        if run_metadata.get('execution_time_start_unix') is not None:
+            extra_config_lines += (
+                f' Execution time T0 (unix): {run_metadata["execution_time_start_unix"]}\n'
+                f' Execution time end (unix): {run_metadata.get("execution_time_end_unix")}\n'
+            )
         for label, key in (
             ('Sigma', 'sigma'),
             ('Kappa', 'kappa'),
@@ -341,7 +409,7 @@ class LogParser:
             f' Collocate primary and workers: {self.collocate}\n'
             f' Input rate: {sum(self.rate):,} tx/s\n'
             f' Transaction size: {self.size[0]:,} B\n'
-            f' Execution time: {round(duration):,} s\n'
+            f' Execution time: {round(duration):,} s (same T0 as latency.csv / plots; see run_metadata execution_time_*)\n'
             '\n'
             f' Header size: {header_size:,} B\n'
             f' Max header delay: {max_header_delay:,} ms\n'
@@ -373,16 +441,19 @@ class LogParser:
     def export_latency_csv(self, filename=None):
         filename = filename or PathMaker.latency_csv_file()
         rows = []
-        baseline_candidates = [
-            self.proposals[digest]
-            for digest in self._committed_batch_ids(require_proposal=True)
-            if digest in self.proposals
-        ]
-        if baseline_candidates:
-            baseline_ts = min(baseline_candidates)
-        else:
-            commit_candidates = [ts for _, ts in self.commits.items()]
-            baseline_ts = min(commit_candidates) if commit_candidates else None
+        win = self.execution_time_window()
+        baseline_ts = win[0] if win else None
+        if baseline_ts is None:
+            baseline_candidates = [
+                self.proposals[digest]
+                for digest in self._committed_batch_ids(require_proposal=True)
+                if digest in self.proposals
+            ]
+            if baseline_candidates:
+                baseline_ts = min(baseline_candidates)
+            else:
+                commit_candidates = [ts for _, ts in self.commits.items()]
+                baseline_ts = min(commit_candidates) if commit_candidates else None
 
         for batch_id, commit_ts in sorted(self.commits.items(), key=lambda item: item[1]):
             proposal_ts = self.proposals.get(batch_id)

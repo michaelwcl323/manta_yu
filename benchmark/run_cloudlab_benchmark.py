@@ -82,6 +82,18 @@ def process_logs(faults=0, save_to_file=True):
     
     try:
         parser = LogParser.process(logs_dir, faults=faults)
+        win = parser.execution_time_window()
+        if win:
+            start_u, end_u, dur_u = win
+            meta_update = {
+                'execution_time_start_unix': start_u,
+                'execution_time_end_unix': end_u,
+                'execution_time_duration_s': dur_u,
+            }
+            origin = parser.execution_origin_unix()
+            if origin is not None:
+                meta_update['execution_origin_unix'] = origin
+            PathMaker.update_run_metadata(meta_update)
         result = parser.result()
         latency_csv = parser.export_latency_csv()
         

@@ -28,6 +28,15 @@ def load_run_metadata(run_dir: Path) -> dict:
     return json.loads(metadata_file.read_text())
 
 
+def execution_time_axis_t0(metadata: dict) -> float | None:
+    """Wall-clock T0 shared with Summary *Execution time* and ``latency.csv`` ``relative_time_s``."""
+    v = metadata.get("execution_time_start_unix")
+    if v is not None:
+        return float(v)
+    legacy = metadata.get("execution_origin_unix")
+    return float(legacy) if legacy is not None else None
+
+
 def config_label(node_params: dict) -> str:
     return f"k{int(node_params.get('kappa', 0))}-c{int(node_params.get('coverage', 0))}"
 
@@ -36,7 +45,7 @@ def get_attack_window(
     metadata: dict,
     attack_start_override: float | None,
     attack_duration_override: float | None,
-) -> dict[str, float | None]:
+) -> dict[str, float | None | bool]:
     node_params = metadata.get("node_params", {})
     attack_enabled = bool(node_params.get("attack_enabled", False))
     attack_start_secs = (
@@ -54,19 +63,30 @@ def get_attack_window(
         attack_start_secs is None
         or (not attack_enabled and attack_start_override is None)
     ):
-        return {"offset_s": None, "start": None, "duration": None}
+        return {
+            "offset_s": None,
+            "start": None,
+            "duration": None,
+            "use_execution_time_axis": False,
+        }
 
+    start_secs = float(attack_start_secs)
+    use_axis = execution_time_axis_t0(metadata) is not None
     return {
-        "offset_s": float(attack_start_secs),
-        "start": 0.0,
+        "offset_s": start_secs,
+        # Same wall clock as Summary Execution time T0: attack at x = attack_start_secs when T0
+        # is last primary boot (matches node ``attack_start_secs`` after boot).
+        "start": start_secs if use_axis else 0.0,
         "duration": float(attack_duration_secs or 0.0),
+        "use_execution_time_axis": use_axis,
     }
 
 
 def load_consensus_latency_rows(
     run_dir: Path,
     time_axis: str,
-    attack_offset_s: float | None,
+    attack_window: dict[str, float | None | bool],
+    metadata: dict,
 ) -> list[dict[str, float]]:
     latency_file = run_dir / "latency.csv"
     if not latency_file.exists():
@@ -86,11 +106,18 @@ def load_consensus_latency_rows(
             proposal_value = float(proposal_ts)
             latency_value = float(latency_ms)
             commit_value = float(commit_ts) if commit_ts else proposal_value + latency_value / 1000.0
+            rel_raw = row.get("relative_time_s")
+            rel_val: float | None
+            try:
+                rel_val = float(rel_raw) if rel_raw not in (None, "") else None
+            except (TypeError, ValueError):
+                rel_val = None
             raw_rows.append(
                 {
                     "proposal_ts": proposal_value,
                     "commit_ts": commit_value,
                     "latency_ms": latency_value,
+                    "relative_time_s": rel_val,
                 }
             )
 
@@ -99,7 +126,24 @@ def load_consensus_latency_rows(
 
     event_key = "proposal_ts" if time_axis == TIME_AXIS_PROPOSAL else "commit_ts"
     first_proposal_ts = min(row["proposal_ts"] for row in raw_rows)
-    attack_offset_s = attack_offset_s or 0.0
+    t0_exec = execution_time_axis_t0(metadata)
+    if t0_exec is not None:
+        out: list[dict[str, float]] = []
+        for row in raw_rows:
+            # ``latency.csv`` records ``relative_time_s = commit_ts - T0`` (same T0 as
+            # ``run_metadata.execution_time_start_unix``). Use that column on the commit axis so
+            # the plot matches the CSV exactly; proposal axis stays ``proposal_ts - T0``.
+            if time_axis == TIME_AXIS_COMMIT:
+                rel = row.get("relative_time_s")
+                if rel is not None:
+                    aligned_time_s = float(rel)
+                else:
+                    aligned_time_s = row["commit_ts"] - t0_exec
+            else:
+                aligned_time_s = row["proposal_ts"] - t0_exec
+            out.append({"aligned_time_s": aligned_time_s, "latency_ms": row["latency_ms"]})
+        return out
+    attack_offset_s = float(attack_window.get("offset_s") or 0.0)
     return [
         {
             "aligned_time_s": row[event_key] - first_proposal_ts - attack_offset_s,
@@ -176,13 +220,20 @@ def aggregate_runs(
         rows = load_consensus_latency_rows(
             run_dir,
             time_axis,
-            attack_window["offset_s"],
+            attack_window,
+            metadata,
         )
         if not rows:
             continue
         grouped_rows[label].extend(rows)
         if attack_window["start"] is not None:
-            attack_windows[label] = attack_window
+            attack_windows[label] = {
+                "start": attack_window["start"],
+                "duration": attack_window["duration"],
+                "use_execution_time_axis": attack_window.get(
+                    "use_execution_time_axis", False
+                ),
+            }
 
     aggregated: dict[str, list[dict[str, float]]] = {}
     for label, rows in grouped_rows.items():
@@ -194,6 +245,110 @@ def aggregate_runs(
         )
 
     return aggregated, attack_windows
+
+
+def draw_latency_execution_line_plot(run_dir: Path, output_path: Path, title: str) -> bool:
+    """Plot every ``consensus_latency`` row from ``latency.csv``: x = execution time from T0, y = latency_ms, connected in time order.
+
+    ``x`` uses ``relative_time_s`` when present (same as export: ``commit_ts - execution_time_start_unix``).
+    Points follow **latency.csv row order** (export sorts by ``commit_ts``), then connected in that order.
+    """
+    metadata = load_run_metadata(run_dir)
+    t0 = execution_time_axis_t0(metadata)
+    latency_path = run_dir / "latency.csv"
+    if not latency_path.is_file():
+        return False
+
+    pairs: list[tuple[float, float]] = []
+    with latency_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("metric") != "consensus_latency":
+                continue
+            latency_ms = row.get("latency_ms")
+            commit_ts = row.get("commit_ts")
+            if not latency_ms:
+                continue
+            rel_raw = row.get("relative_time_s")
+            try:
+                y = float(latency_ms)
+            except (TypeError, ValueError):
+                continue
+            x: float | None = None
+            if rel_raw not in (None, ""):
+                try:
+                    x = float(rel_raw)
+                except (TypeError, ValueError):
+                    x = None
+            if x is None and t0 is not None and commit_ts:
+                try:
+                    x = float(commit_ts) - float(t0)
+                except (TypeError, ValueError):
+                    continue
+            elif x is None:
+                continue
+            pairs.append((x, y))
+
+    if not pairs:
+        return False
+
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+
+    fig, ax = plt.subplots(figsize=(11, 5.2), dpi=160)
+    ax.plot(
+        xs,
+        ys,
+        color="#1d4ed8",
+        linewidth=0.35,
+        linestyle="-",
+        rasterized=True,
+        label="consensus_latency (CSV row order)",
+    )
+    if len(xs) <= 25_000:
+        ax.scatter(
+            xs,
+            ys,
+            s=2,
+            c="#1e3a8a",
+            alpha=0.1,
+            linewidths=0,
+            rasterized=True,
+            zorder=3,
+        )
+
+    node_params = metadata.get("node_params", {})
+    if bool(node_params.get("attack_enabled")):
+        try:
+            a_start = float(node_params.get("attack_start_secs") or 0)
+            a_dur = float(node_params.get("attack_duration_secs") or 0)
+            ax.axvline(a_start, color="#475569", linestyle="--", linewidth=1.1, label="attack start")
+            if a_dur > 0:
+                ax.axvspan(a_start, a_start + a_dur, color="#94a3b8", alpha=0.12)
+                ax.axvline(
+                    a_start + a_dur,
+                    color="#64748b",
+                    linestyle=":",
+                    linewidth=1.0,
+                    label="attack end",
+                )
+        except (TypeError, ValueError):
+            pass
+
+    ax.set_title(title)
+    ax.set_xlabel(
+        "Execution time (s) from T0 — latency.csv relative_time_s (= commit_ts − T0)"
+        if t0 is not None
+        else "Execution time (s) — latency.csv relative_time_s"
+    )
+    ax.set_ylabel("Consensus latency (ms)")
+    ax.grid(True, linestyle="--", linewidth=0.45, alpha=0.45)
+    ax.legend(loc="upper right", fontsize=8)
+    ax.margins(x=0.01, y=0.06)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+    return True
 
 
 def discover_run_dirs(input_dir: Path) -> list[Path]:
@@ -265,11 +420,23 @@ def draw(
                     label="attack end",
                 )
 
-    axis_label = (
-        "Seconds relative to configured attack start from first proposal (proposal time)"
-        if time_axis == TIME_AXIS_PROPOSAL
-        else "Seconds relative to configured attack start from first proposal (commit time)"
-    )
+    use_exec = False
+    if attack_windows:
+        use_exec = bool(
+            next(iter(attack_windows.values())).get("use_execution_time_axis")
+        )
+    if use_exec:
+        axis_label = (
+            "Execution time (s) since run_metadata.execution_time_start_unix (proposal_ts − T0)"
+            if time_axis == TIME_AXIS_PROPOSAL
+            else "Execution time (s) = latency.csv relative_time_s (commit_ts − T0)"
+        )
+    else:
+        axis_label = (
+            "Seconds since earliest proposal minus attack_start_secs offset (proposal time)"
+            if time_axis == TIME_AXIS_PROPOSAL
+            else "Seconds since earliest proposal minus attack_start_secs offset (commit time)"
+        )
     ax.set_title(title)
     ax.set_xlabel(axis_label)
     ax.set_ylabel("Consensus latency p95 (ms)")
@@ -323,8 +490,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--time-axis",
         choices=[TIME_AXIS_PROPOSAL, TIME_AXIS_COMMIT],
-        default=TIME_AXIS_PROPOSAL,
-        help="Align points by proposal time or commit time. Defaults to proposal time.",
+        default=TIME_AXIS_COMMIT,
+        help=(
+            "Align rolling samples by proposal or commit wall time. Default commit: matches "
+            "latency.csv ``relative_time_s`` (= commit_ts − execution_time_start_unix) and "
+            "Summary Execution time."
+        ),
     )
     parser.add_argument(
         "--order",
@@ -342,6 +513,11 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Override attack duration in seconds when metadata is missing or incorrect.",
+    )
+    parser.add_argument(
+        "--skip-raw-line-plot",
+        action="store_true",
+        help="Do not write latency_execution_line.png (per-sample line plot from latency.csv).",
     )
     return parser.parse_args()
 
@@ -379,6 +555,13 @@ def main() -> None:
         args.time_axis,
     )
     print(output_path)
+
+    if not args.skip_raw_line_plot:
+        raw_title = f"{args.title} — per-sample consensus latency (CSV)"
+        for run_dir in run_dirs:
+            raw_out = run_dir / "latency_execution_line.png"
+            if draw_latency_execution_line_plot(run_dir, raw_out, raw_title):
+                print(raw_out)
 
 
 if __name__ == "__main__":
