@@ -252,7 +252,7 @@ impl Consensus {
             state.insert(certificate);
 
             // Emit DAG visualization for extract_final_dag / extract_dag_out (full DAG per round).
-            self.visualize_dag(&state, round);
+            // self.visualize_dag(&state, round);
 
             let mut cleared = Vec::new();
             pending_commit_checks.retain(|pending| {
