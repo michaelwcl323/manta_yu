@@ -6,6 +6,7 @@ This module provides functionality to run benchmarks on CloudLab nodes.
 """
 
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
@@ -91,6 +92,57 @@ class CloudLabBench:
         else:
             if output.stderr:
                 raise ExecutionError(output.stderr)
+
+    def _auto_plot_run_latency(self, run_dir):
+        """Generate latency plots for a single run directory."""
+        base_dir = Path(__file__).resolve().parent.parent
+        run_path = Path(run_dir)
+        if not run_path.is_absolute():
+            run_path = base_dir / run_path
+
+        latency_csv = run_path / 'latency.csv'
+        if not latency_csv.exists():
+            Print.warn(f'Auto-plot skipped: latency.csv not found in {run_path}')
+            return
+
+        plots = [
+            (
+                base_dir / 'plot_primary_start_consensus_avg_per_run.py',
+                ['--input-dir', str(run_path), '--time-axis', 'commit'],
+            ),
+            (
+                base_dir / 'plot_attack_latency_timeseries.py',
+                ['--input-dir', str(run_path), '--time-axis', 'commit'],
+            ),
+        ]
+
+        for script_path, extra_args in plots:
+            if not script_path.exists():
+                Print.warn(f'Auto-plot skipped: script not found at {script_path}')
+                continue
+
+            try:
+                result = subprocess.run(
+                    ['python3', str(script_path), *extra_args],
+                    cwd=str(base_dir),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception as e:
+                Print.warn(f'Auto-plot failed for {run_path}: {e}')
+                continue
+
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or '').strip()
+                Print.warn(f'Auto-plot failed for {run_path}: {err}')
+                continue
+
+            output_text = (result.stdout or '').strip()
+            if output_text:
+                Print.info('Auto-plot generated:')
+                for line in output_text.splitlines():
+                    Print.info(f'  {line}')
     
     def _get_connection_kwargs(self, host_info):
         """Get connection kwargs for a specific host (without port/timeout, passed separately)"""
@@ -200,7 +252,7 @@ class CloudLabBench:
             # Add cargo to PATH permanently
             'echo "export PATH=\\$HOME/.cargo/bin:\\$PATH" >> $HOME/.bashrc',
             'echo "export PATH=\\$HOME/.cargo/bin:\\$PATH" >> $HOME/.profile',
-            f'(git clone {self.settings.repo_url} || (cd {self.settings.repo_name} ; git pull))',
+            f'(if [ -d {self.settings.repo_name}/.git ]; then cd {self.settings.repo_name} && git pull; else git clone {self.settings.repo_url} {self.settings.repo_name}; fi)',
             f'cd {self.settings.repo_name}/benchmark && pip3 install -r requirements.txt'
         ]
         
@@ -1381,6 +1433,18 @@ SCRIPTEOF'''
             if isinstance(e, BenchError):
                 raise
             raise BenchError(f'Failed to start {name} on {hostname}', e)
+
+    def _background_run_batch(self, launches):
+        if not launches:
+            return
+
+        with ThreadPoolExecutor(max_workers=min(32, len(launches))) as executor:
+            futures = [
+                executor.submit(self._background_run, host_info, command, log_file)
+                for host_info, command, log_file in launches
+            ]
+            for future in as_completed(futures):
+                future.result()
     
     def _get_host_by_address(self, address, selected_hosts):
         """Get host info by extracting IP from address"""
@@ -1436,8 +1500,49 @@ SCRIPTEOF'''
         # Pre-compute workers' addresses (filtered for faults) – same as Bench._run_single
         workers_addresses = committee.workers_addresses(faults)
 
-        # 2. Run the clients first (they will wait for the nodes to be ready)
-        #    This mirrors benchmark/benchmark/remote.py::_run_single
+        # 2. Run the primaries first.
+        Print.info('Booting primaries...')
+        primary_launches = []
+        for i, address in enumerate(committee.primary_addresses(faults)):
+            host_info = self._get_host_by_address(address, selected_hosts)
+            if not host_info:
+                Print.warn(f'Could not find host for address {address}')
+                continue
+
+            cmd = CommandMaker.run_primary(
+                PathMaker.key_file(i),
+                PathMaker.committee_file(),
+                PathMaker.db_path(i),
+                PathMaker.parameters_file(),
+                debug=debug
+            )
+            log_file = PathMaker.primary_log_file(i)
+            primary_launches.append((host_info, cmd, log_file))
+        self._background_run_batch(primary_launches)
+
+        # 3. Run the workers.
+        Print.info('Booting workers...')
+        worker_launches = []
+        for i, addresses in enumerate(workers_addresses):
+            for (id, address) in addresses:
+                host_info = self._get_host_by_address(address, selected_hosts)
+                if not host_info:
+                    Print.warn(f'Could not find host for address {address}')
+                    continue
+
+                cmd = CommandMaker.run_worker(
+                    PathMaker.key_file(i),
+                    PathMaker.committee_file(),
+                    PathMaker.db_path(i, id),
+                    PathMaker.parameters_file(),
+                    id,  # The worker's id.
+                    debug=debug
+                )
+                log_file = PathMaker.worker_log_file(i, id)
+                worker_launches.append((host_info, cmd, log_file))
+        self._background_run_batch(worker_launches)
+
+        # 4. Run the clients last.
         Print.info('Booting clients...')
         workers_total = committee.workers()
         if bench_parameters.rate_type == 'balanced':
@@ -1462,6 +1567,7 @@ SCRIPTEOF'''
             )
 
         worker_index = 0
+        client_launches = []
         for i, addresses in enumerate(workers_addresses):
             for (id, address) in addresses:
                 host_info = self._get_host_by_address(address, selected_hosts)
@@ -1477,46 +1583,9 @@ SCRIPTEOF'''
                     [x for y in workers_addresses for _, x in y]
                 )
                 log_file = PathMaker.client_log_file(i, id)
-                self._background_run(host_info, cmd, log_file)
+                client_launches.append((host_info, cmd, log_file))
                 worker_index += 1
-
-        # 3. Run the primaries (except the faulty ones) – same order as Bench._run_single
-        Print.info('Booting primaries...')
-        for i, address in enumerate(committee.primary_addresses(faults)):
-            host_info = self._get_host_by_address(address, selected_hosts)
-            if not host_info:
-                Print.warn(f'Could not find host for address {address}')
-                continue
-
-            cmd = CommandMaker.run_primary(
-                PathMaker.key_file(i),
-                PathMaker.committee_file(),
-                PathMaker.db_path(i),
-                PathMaker.parameters_file(),
-                debug=debug
-            )
-            log_file = PathMaker.primary_log_file(i)
-            self._background_run(host_info, cmd, log_file)
-
-        # 4. Run the workers (except the faulty ones) – same as Bench._run_single
-        Print.info('Booting workers...')
-        for i, addresses in enumerate(workers_addresses):
-            for (id, address) in addresses:
-                host_info = self._get_host_by_address(address, selected_hosts)
-                if not host_info:
-                    Print.warn(f'Could not find host for address {address}')
-                    continue
-
-                cmd = CommandMaker.run_worker(
-                    PathMaker.key_file(i),
-                    PathMaker.committee_file(),
-                    PathMaker.db_path(i, id),
-                    PathMaker.parameters_file(),
-                    id,  # The worker's id.
-                    debug=debug
-                )
-                log_file = PathMaker.worker_log_file(i, id)
-                self._background_run(host_info, cmd, log_file)
+        self._background_run_batch(client_launches)
 
         # 5. Wait for all transactions to be processed (progress output)
         duration = bench_parameters.duration
@@ -1691,6 +1760,7 @@ SCRIPTEOF'''
                                 max_workers=bench_parameters.workers,
                             )
                             PathMaker.export_run_artifacts()
+                            self._auto_plot_run_latency(run_dir)
                         except (subprocess.SubprocessError, GroupException, ParseError) as e:
                             self.kill(hosts=selected_hosts)
                             if isinstance(e, GroupException):
@@ -1699,4 +1769,3 @@ SCRIPTEOF'''
                             continue
         
         Print.heading('All benchmarks completed')
-

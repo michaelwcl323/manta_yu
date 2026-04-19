@@ -1,5 +1,6 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
 from paramiko import RSAKey
@@ -71,7 +72,7 @@ class Bench:
             'sudo apt-get install -y clang',
 
             # Clone the repo.
-            f'(git clone {self.settings.repo_url} || (cd {self.settings.repo_name} ; git pull))'
+            f'(if [ -d {self.settings.repo_name}/.git ]; then cd {self.settings.repo_name} && git pull; else git clone {self.settings.repo_url} {self.settings.repo_name}; fi)'
         ]
         hosts = self.manager.hosts(flat=True)
         try:
@@ -135,6 +136,18 @@ class Bench:
         c = Connection(host, user='ubuntu', connect_kwargs=self.connect)
         output = c.run(cmd, hide=True)
         self._check_stderr(output)
+
+    def _background_run_batch(self, launches):
+        if not launches:
+            return
+
+        with ThreadPoolExecutor(max_workers=min(32, len(launches))) as executor:
+            futures = [
+                executor.submit(self._background_run, host, command, log_file)
+                for host, command, log_file in launches
+            ]
+            for future in as_completed(futures):
+                future.result()
 
     def _update(self, hosts, collocate):
         if collocate:
@@ -230,6 +243,7 @@ class Bench:
         Print.info('Booting clients...')
         workers_addresses = committee.workers_addresses(faults)
         rate_share = ceil(rate / committee.workers())
+        client_launches = []
         for i, addresses in enumerate(workers_addresses):
             for (id, address) in addresses:
                 host = Committee.ip(address)
@@ -240,24 +254,12 @@ class Bench:
                     [x for y in workers_addresses for _, x in y]
                 )
                 log_file = PathMaker.client_log_file(i, id)
-                self._background_run(host, cmd, log_file)
+                client_launches.append((host, cmd, log_file))
+        self._background_run_batch(client_launches)
 
-        # Run the primaries (except the faulty ones).
-        Print.info('Booting primaries...')
-        for i, address in enumerate(committee.primary_addresses(faults)):
-            host = Committee.ip(address)
-            cmd = CommandMaker.run_primary(
-                PathMaker.key_file(i),
-                PathMaker.committee_file(),
-                PathMaker.db_path(i),
-                PathMaker.parameters_file(),
-                debug=debug
-            )
-            log_file = PathMaker.primary_log_file(i)
-            self._background_run(host, cmd, log_file)
-
-        # Run the workers (except the faulty ones).
+        # Run the workers before the primaries.
         Print.info('Booting workers...')
+        worker_launches = []
         for i, addresses in enumerate(workers_addresses):
             for (id, address) in addresses:
                 host = Committee.ip(address)
@@ -270,7 +272,24 @@ class Bench:
                     debug=debug
                 )
                 log_file = PathMaker.worker_log_file(i, id)
-                self._background_run(host, cmd, log_file)
+                worker_launches.append((host, cmd, log_file))
+        self._background_run_batch(worker_launches)
+
+        # Run the primaries last.
+        Print.info('Booting primaries...')
+        primary_launches = []
+        for i, address in enumerate(committee.primary_addresses(faults)):
+            host = Committee.ip(address)
+            cmd = CommandMaker.run_primary(
+                PathMaker.key_file(i),
+                PathMaker.committee_file(),
+                PathMaker.db_path(i),
+                PathMaker.parameters_file(),
+                debug=debug
+            )
+            log_file = PathMaker.primary_log_file(i)
+            primary_launches.append((host, cmd, log_file))
+        self._background_run_batch(primary_launches)
 
         # Wait for all transactions to be processed.
         duration = bench_parameters.duration

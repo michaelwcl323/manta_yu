@@ -15,6 +15,50 @@ class ParseError(Exception):
     pass
 
 
+def _to_posix_utc(string):
+    x = datetime.fromisoformat(string.replace('Z', '+00:00'))
+    return datetime.timestamp(x)
+
+
+def parse_primary_log_markers(log_path):
+    if not log_path or not os.path.exists(log_path):
+        return {}
+
+    markers = {
+        'boot_ts': None,
+        'first_created_ts': None,
+        'attack_start_ts': None,
+        'attack_end_ts': None,
+    }
+
+    with open(log_path, 'r', errors='replace') as f:
+        for line in f:
+            if markers['boot_ts'] is None:
+                match = search(r'\[(.*Z) .* booted on (\d+.\d+.\d+.\d+)', line)
+                if match is not None:
+                    markers['boot_ts'] = _to_posix_utc(match.group(1))
+
+            if markers['first_created_ts'] is None:
+                match = search(r'\[(.*Z) .* Created B\d+\([^ ]+\) -> ([^ ]+=)', line)
+                if match is not None:
+                    markers['first_created_ts'] = _to_posix_utc(match.group(1))
+
+            if markers['attack_start_ts'] is None and 'start attack' in line:
+                match = search(r'\[(.*Z) ', line)
+                if match is not None:
+                    markers['attack_start_ts'] = _to_posix_utc(match.group(1))
+
+            if markers['attack_end_ts'] is None and 'end attack' in line:
+                match = search(r'\[(.*Z) ', line)
+                if match is not None:
+                    markers['attack_end_ts'] = _to_posix_utc(match.group(1))
+
+            if all(value is not None for value in markers.values()):
+                break
+
+    return markers
+
+
 class LogParser:
     def __init__(self, clients, primaries, workers, faults=0,
                  default_client_size=None, default_client_rates=None):
@@ -63,9 +107,10 @@ class LogParser:
                 results = p.map(self._parse_primaries, primaries)
         except (ValueError, IndexError, AttributeError) as e:
             raise ParseError(f'Failed to parse nodes\' logs: {e}')
-        proposals, commits, self.configs, primary_ips = zip(*results)
+        proposals, commits, self.configs, primary_ips, primary_boot_ts = zip(*results)
         self.proposals = self._merge_results([x.items() for x in proposals])
         self.commits = self._merge_results([x.items() for x in commits])
+        self.primary_boot_ts = [x for x in primary_boot_ts if x is not None]
 
         # Parse the workers logs.
         try:
@@ -152,9 +197,16 @@ class LogParser:
             ),
         }
 
-        ip = search(r'booted on (\d+.\d+.\d+.\d+)', log).group(1)
-        
-        return proposals, commits, configs, ip
+        boot_line = search(r'\[(.*Z) .* booted on (\d+.\d+.\d+.\d+)', log)
+        if boot_line is not None:
+            boot_ts = self._to_posix(boot_line.group(1))
+            ip = boot_line.group(2)
+        else:
+            # Fallback for older log formats.
+            ip = search(r'booted on (\d+.\d+.\d+.\d+)', log).group(1)
+            boot_ts = None
+
+        return proposals, commits, configs, ip, boot_ts
 
     def _parse_workers(self, log):
         if search(r'(?:panic|Error)', log) is not None:
@@ -171,8 +223,7 @@ class LogParser:
         return sizes, samples, ip
 
     def _to_posix(self, string):
-        x = datetime.fromisoformat(string.replace('Z', '+00:00'))
-        return datetime.timestamp(x)
+        return _to_posix_utc(string)
 
     def _committed_batch_ids(self, require_proposal=False):
         batch_ids = list(self.sizes.keys())

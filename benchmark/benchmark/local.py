@@ -1,5 +1,6 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from math import ceil
 from os.path import basename, splitext
@@ -78,6 +79,18 @@ class LocalBench:
         )
         self._processes.append(process)
 
+    def _background_run_batch(self, launches):
+        if not launches:
+            return
+
+        with ThreadPoolExecutor(max_workers=min(32, len(launches))) as executor:
+            futures = [
+                executor.submit(self._background_run, command, log_file)
+                for command, log_file in launches
+            ]
+            for future in as_completed(futures):
+                future.result()
+
     def _kill_nodes(self):
         try:
             if self._processes:
@@ -154,9 +167,10 @@ class LocalBench:
 
             self.node_parameters.print(PathMaker.parameters_file())
 
-            # Run the clients (they will wait for the nodes to be ready).
+            # Run the clients first (they will wait for the nodes to be ready).
             workers_addresses = committee.workers_addresses(self.faults)
             client_rates = []
+            client_launches = []
             if rate_type == 'balanced':
                 rate_share = ceil(rate / committee.workers())
                 for i, addresses in enumerate(workers_addresses):
@@ -169,7 +183,7 @@ class LocalBench:
                             [x for y in workers_addresses for _, x in y]
                         )
                         log_file = PathMaker.client_log_file(i, id)
-                        self._background_run(cmd, log_file)
+                        client_launches.append((cmd, log_file))
             else:
                 # generate a list of rate with zipf
                 zipf_allocator = ZipfAllocator(rate, committee.workers(), self.s)
@@ -186,21 +200,11 @@ class LocalBench:
                             [x for y in workers_addresses for _, x in y]
                         )
                         log_file = PathMaker.client_log_file(i, id)
-                        self._background_run(cmd, log_file)
+                        client_launches.append((cmd, log_file))
+            self._background_run_batch(client_launches)
 
-            # Run the primaries (except the faulty ones).
-            for i, address in enumerate(committee.primary_addresses(self.faults)):
-                cmd = CommandMaker.run_primary(
-                    PathMaker.key_file(i),
-                    PathMaker.committee_file(),
-                    PathMaker.db_path(i),
-                    PathMaker.parameters_file(),
-                    debug=debug
-                )
-                log_file = PathMaker.primary_log_file(i)
-                self._background_run(cmd, log_file)
-
-            # Run the workers (except the faulty ones).
+            # Run the workers before the primaries.
+            worker_launches = []
             for i, addresses in enumerate(workers_addresses):
                 for (id, address) in addresses:
                     cmd = CommandMaker.run_worker(
@@ -212,7 +216,22 @@ class LocalBench:
                         debug=debug
                     )
                     log_file = PathMaker.worker_log_file(i, id)
-                    self._background_run(cmd, log_file)
+                    worker_launches.append((cmd, log_file))
+            self._background_run_batch(worker_launches)
+
+            # Run the primaries last.
+            primary_launches = []
+            for i, address in enumerate(committee.primary_addresses(self.faults)):
+                cmd = CommandMaker.run_primary(
+                    PathMaker.key_file(i),
+                    PathMaker.committee_file(),
+                    PathMaker.db_path(i),
+                    PathMaker.parameters_file(),
+                    debug=debug
+                )
+                log_file = PathMaker.primary_log_file(i)
+                primary_launches.append((cmd, log_file))
+            self._background_run_batch(primary_launches)
 
             # Wait for all transactions to be processed.
             Print.info(f'Running benchmark ({self.duration} sec)...')

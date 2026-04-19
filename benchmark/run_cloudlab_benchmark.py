@@ -14,7 +14,7 @@ from datetime import datetime
 # Add benchmark directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from benchmark.logs import LogParser, ParseError
+from benchmark.logs import LogParser, ParseError, parse_primary_log_markers
 from benchmark.utils import PathMaker, Print, BenchError
 
 def run_fab_command(task='cloudlab_remote', debug=False, fab_kwargs=None):
@@ -84,6 +84,76 @@ def process_logs(faults=0, save_to_file=True):
         parser = LogParser.process(logs_dir, faults=faults)
         result = parser.result()
         latency_csv = parser.export_latency_csv()
+
+        # Derive attack-time alignment metadata so plotting scripts can place
+        # attack markers on the same time axis as latency.csv.
+        try:
+            primary_boot_ts = min(parser.primary_boot_ts) if getattr(parser, 'primary_boot_ts', None) else None
+            first_proposal_ts = min(parser.proposals.values()) if getattr(parser, 'proposals', None) else None
+            boot_to_first_proposal_secs = (
+                float(first_proposal_ts - primary_boot_ts)
+                if (primary_boot_ts is not None and first_proposal_ts is not None)
+                else None
+            )
+            primary0_markers = parse_primary_log_markers(PathMaker.primary_log_file(0))
+            primary0_attack_start_ts = primary0_markers.get('attack_start_ts')
+            primary0_attack_end_ts = primary0_markers.get('attack_end_ts')
+            primary0_first_proposal_ts = primary0_markers.get('first_created_ts')
+
+            current_metadata = PathMaker.load_run_metadata()
+            configured_attack_start = (
+                current_metadata.get('node_params', {}).get('attack_start_secs')
+                if isinstance(current_metadata, dict)
+                else None
+            )
+            configured_attack_duration = (
+                current_metadata.get('node_params', {}).get('attack_duration_secs')
+                if isinstance(current_metadata, dict)
+                else None
+            )
+            attack_start_on_primary_axis = None
+            if primary0_attack_start_ts is not None and first_proposal_ts is not None:
+                attack_start_on_primary_axis = float(primary0_attack_start_ts - first_proposal_ts)
+            elif configured_attack_start is not None and boot_to_first_proposal_secs is not None:
+                attack_start_on_primary_axis = (
+                    float(configured_attack_start) - boot_to_first_proposal_secs
+                )
+
+            attack_end_on_primary_axis = None
+            if primary0_attack_end_ts is not None and first_proposal_ts is not None:
+                attack_end_on_primary_axis = float(primary0_attack_end_ts - first_proposal_ts)
+
+            attack_duration_from_logs = (
+                float(primary0_attack_end_ts - primary0_attack_start_ts)
+                if (
+                    primary0_attack_start_ts is not None
+                    and primary0_attack_end_ts is not None
+                )
+                else (
+                    float(configured_attack_duration)
+                    if configured_attack_duration is not None
+                    else None
+                )
+            )
+
+            PathMaker.update_run_metadata(
+                {
+                    'derived_timing': {
+                        'primary_boot_ts': primary_boot_ts,
+                        'first_proposal_ts': first_proposal_ts,
+                        'primary_boot_to_first_proposal_secs': boot_to_first_proposal_secs,
+                        'attack_start_on_primary_start_axis_secs': attack_start_on_primary_axis,
+                        'attack_end_on_primary_start_axis_secs': attack_end_on_primary_axis,
+                        'attack_duration_secs': attack_duration_from_logs,
+                        'primary0_boot_ts': primary0_markers.get('boot_ts'),
+                        'primary0_first_proposal_ts': primary0_first_proposal_ts,
+                        'primary0_attack_start_ts': primary0_attack_start_ts,
+                        'primary0_attack_end_ts': primary0_attack_end_ts,
+                    }
+                }
+            )
+        except Exception as timing_error:
+            Print.warn(f'Failed to update derived timing metadata: {timing_error}')
         
         # Print results
         print(result)
@@ -323,4 +393,3 @@ Examples:
 
 if __name__ == '__main__':
     sys.exit(main())
-

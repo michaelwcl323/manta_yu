@@ -267,8 +267,8 @@ def cloudlab_remote(
     debug=False,
     sigma=1,
     kappa=2,
-    reference=4,
-    coverage=4,
+    reference=7,
+    coverage=7,
 
 
     allow_cross_step_weak_edges=False,  # 跨solid-step的weak edges
@@ -295,8 +295,8 @@ def cloudlab_remote(
     solid_candidate_threshold=0,
 
     attack_enabled=True,
-    attack_start_secs=80,
-    attack_duration_secs=5,
+    attack_start_secs=60,
+    attack_duration_secs=1000,
     attack_group_size=5,
     attack_limit_headers=False,
     attack_limit_certificates=True,
@@ -307,9 +307,9 @@ def cloudlab_remote(
     adaptive_intermediate_spill_cap_digests=1,
 
     #会根据这些tag会自动生成目录，将运行结果分类 目录是 design_tag/network_tag/load_tag/
-    design_tag='experiment2_attack',
+    design_tag='experiment2_attack_final',
     network_tag='geo',
-    load_tag='balanced_50_50',
+    load_tag='balanced_50_500000_50',
 ):
     ''' Run benchmarks on CloudLab '''
     allow_cross_step_weak_edges = _coerce_bool(allow_cross_step_weak_edges)
@@ -326,7 +326,7 @@ def cloudlab_remote(
         'workers': 1,
         'collocate': True,
         'rate_type': 'balanced',
-        'rate': [80000],
+        'rate': [100000],
         # 'rate': [40000,60000],
         # 'rate': [40000,80000,100000,120000,140000,150000,160000,180000],
         # 'rate': [130000],
@@ -343,7 +343,7 @@ def cloudlab_remote(
     node_params = {
         'header_size': 1_000,  # bytes
         'max_header_delay': 50,  # ms
-        'gc_depth': 50,  # rounds
+        'gc_depth': 200,  # rounds
         'sync_retry_delay': 1000,  # ms
         'sync_retry_nodes': 7,  # number of nodes
         'batch_size': 500000,  # bytes
