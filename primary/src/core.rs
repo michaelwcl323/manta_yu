@@ -9,7 +9,7 @@ use bytes::Bytes;
 use config::Committee;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use network::{CancelHandler, ReliableSender};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -123,6 +123,40 @@ impl Core {
         elapsed < start + Duration::from_secs(duration_secs)
     }
 
+    fn spawn_attack_log_task(committee: Committee, boot_instant: Instant) {
+        if !committee.attack_enabled {
+            return;
+        }
+
+        tokio::spawn(async move {
+            let attack_start =
+                tokio::time::Instant::from_std(boot_instant + Duration::from_secs(committee.attack_start_secs));
+            tokio::time::sleep_until(attack_start).await;
+            info!(
+                "start attack: headers_limited={} certificates_limited={} \
+                 start_secs={} duration_secs={} group_size={} kappa={} reference={} coverage={}",
+                committee.attack_limit_headers,
+                committee.attack_limit_certificates,
+                committee.attack_start_secs,
+                committee.attack_duration_secs,
+                committee.attack_group_size,
+                committee.kappa,
+                committee.reference,
+                committee.coverage,
+            );
+
+            if committee.attack_duration_secs > 0 {
+                let attack_end = attack_start + Duration::from_secs(committee.attack_duration_secs);
+                tokio::time::sleep_until(attack_end).await;
+                info!(
+                    "end attack: elapsed_since_boot_secs={} duration_secs={}",
+                    committee.attack_start_secs + committee.attack_duration_secs,
+                    committee.attack_duration_secs,
+                );
+            }
+        });
+    }
+
     fn broadcast_targets(&self, filter_for_headers: bool) -> Vec<(PublicKey, std::net::SocketAddr)> {
         let attack_active = if filter_for_headers {
             self.attack_active_for_headers()
@@ -160,6 +194,8 @@ impl Core {
         tx_proposer: Sender<(ProposalParents, Round)>,
     ) {
         tokio::spawn(async move {
+            let boot_instant = Instant::now();
+            Self::spawn_attack_log_task(committee.clone(), boot_instant);
             Self {
                 name,
                 committee,
@@ -182,7 +218,7 @@ impl Core {
                 certificates_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
-                boot_instant: Instant::now(),
+                boot_instant,
             }
             .run()
             .await;
