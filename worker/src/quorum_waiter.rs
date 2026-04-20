@@ -57,31 +57,47 @@ impl QuorumWaiter {
         deliver
     }
 
+    async fn wait_for_quorum(
+        committee: Committee,
+        stake: Stake,
+        batch: SerializedBatchMessage,
+        handlers: Vec<(PublicKey, CancelHandler)>,
+        tx_batch: Sender<SerializedBatchMessage>,
+    ) {
+        let mut wait_for_quorum: FuturesUnordered<_> = handlers
+            .into_iter()
+            .map(|(name, handler)| {
+                let stake = committee.stake(&name);
+                Self::waiter(handler, stake)
+            })
+            .collect();
+
+        // Wait for the first 2f nodes to send back an Ack. Then we consider the batch
+        // delivered and we send its digest to the primary (that will include it into
+        // the dag). Each batch waits independently so a slow quorum does not block
+        // newer batches from progressing through the worker pipeline.
+        let mut total_stake = stake;
+        while let Some(stake) = wait_for_quorum.next().await {
+            total_stake += stake;
+            if total_stake >= committee.quorum_threshold() {
+                tx_batch
+                    .send(batch)
+                    .await
+                    .expect("Failed to deliver batch");
+                break;
+            }
+        }
+    }
+
     /// Main loop.
     async fn run(&mut self) {
         while let Some(QuorumWaiterMessage { batch, handlers }) = self.rx_message.recv().await {
-            let mut wait_for_quorum: FuturesUnordered<_> = handlers
-                .into_iter()
-                .map(|(name, handler)| {
-                    let stake = self.committee.stake(&name);
-                    Self::waiter(handler, stake)
-                })
-                .collect();
-
-            // Wait for the first 2f nodes to send back an Ack. Then we consider the batch
-            // delivered and we send its digest to the primary (that will include it into
-            // the dag). This should reduce the amount of synching.
-            let mut total_stake = self.stake;
-            while let Some(stake) = wait_for_quorum.next().await {
-                total_stake += stake;
-                if total_stake >= self.committee.quorum_threshold() {
-                    self.tx_batch
-                        .send(batch)
-                        .await
-                        .expect("Failed to deliver batch");
-                    break;
-                }
-            }
+            let committee = self.committee.clone();
+            let stake = self.stake;
+            let tx_batch = self.tx_batch.clone();
+            tokio::spawn(async move {
+                Self::wait_for_quorum(committee, stake, batch, handlers, tx_batch).await;
+            });
         }
     }
 }
