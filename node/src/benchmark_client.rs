@@ -129,9 +129,32 @@ impl Client {
 
                 tx.resize(self.size, 0u8);
                 let bytes = tx.split().freeze();
-                if let Err(e) = transport.send(bytes).await {
-                    warn!("Failed to send transaction: {}", e);
-                    break 'main;
+                let send_started = Instant::now();
+                let blocked_log_interval = Duration::from_secs(5);
+                let send_future = transport.send(bytes);
+                tokio::pin!(send_future);
+                let blocked_log_timer = sleep(blocked_log_interval);
+                tokio::pin!(blocked_log_timer);
+
+                loop {
+                    tokio::select! {
+                        result = &mut send_future => {
+                            if let Err(e) = result {
+                                warn!("Failed to send transaction: {}", e);
+                                break 'main;
+                            }
+                            break;
+                        }
+                        _ = &mut blocked_log_timer => {
+                            warn!(
+                                "Still blocked sending transactions after {} ms",
+                                send_started.elapsed().as_millis()
+                            );
+                            blocked_log_timer
+                                .as_mut()
+                                .reset(Instant::now() + blocked_log_interval);
+                        }
+                    }
                 }
             }
             if now.elapsed().as_millis() > BURST_DURATION as u128 {
