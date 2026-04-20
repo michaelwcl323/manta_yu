@@ -1,0 +1,48 @@
+Benchmark Results - 2026-04-19 07:21:47
+============================================================
+
+-----------------------------------------
+ SUMMARY:
+-----------------------------------------
+ + CONFIG:
+ Faults: 0 node(s)
+ Committee size: 10 node(s)
+ Worker(s) per node: 1 worker(s)
+ Collocate primary and workers: True
+ Input rate: 120,000 tx/s
+ Transaction size: 512 B
+ Execution time: 107 s
+
+ Header size: 1,000 B
+ Max header delay: 100 ms
+ GC depth: 50 round(s)
+ Sync retry delay: 1,000 ms
+ Sync retry nodes: 7 node(s)
+ batch size: 500,000 B
+ Max batch delay: 50 ms
+ Sigma: 2
+ Kappa: 2
+ Reference: 4
+ Coverage: 7
+ Allow cross-step weak edges: True
+ Enable fast coin: True
+ Solid commit trigger on solid step: False
+ Enable commit recheck: True
+ Fast coin candidate threshold: 4
+ Solid candidate threshold: 4
+ Enable adaptive intermediate spill: True
+ Adaptive intermediate spill trigger digests: 2
+ Adaptive intermediate spill cap digests: 1
+ Design tag: manta_no_solid_round
+ Network tag: geo
+ Load tag: balanced_100_50
+
+ + RESULTS:
+ Consensus TPS: 95,408 tx/s
+ Consensus BPS: 48,849,074 B/s
+ Consensus latency: 2,413 ms
+
+ End-to-end TPS: 95,308 tx/s
+ End-to-end BPS: 48,797,705 B/s
+ End-to-end latency: 2,757 ms
+-----------------------------------------

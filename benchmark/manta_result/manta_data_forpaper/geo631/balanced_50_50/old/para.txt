@@ -1,5 +1,0 @@
-
-grace_delay = 100
-spill = 3
-duration= 200s
-但看上去效果并不好，end-to-end 有大问题

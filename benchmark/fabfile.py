@@ -288,7 +288,7 @@ def cloudlab_remote(
 #    - 检查对象：r3 -> r1
 #    - 只要前面没提交成功，就还要走这一步
 
-    enable_fast_coin=True, # fast-coin commit 第二轮结束提交
+    enable_fast_coin=False, # fast-coin commit 第二轮结束提交
     solid_commit_trigger_on_solid_step=True, # r3 commit 第三轮结束提交，在收到第一个第四轮证书后 + solid_candidate_threshold 达到预期
     enable_commit_recheck=True, # r2 commit  fast_coin_candidate_threshold 达到预期
     fast_coin_candidate_threshold=4,
@@ -300,7 +300,7 @@ def cloudlab_remote(
     adaptive_intermediate_spill_cap_digests=1,
 
     #会根据这些tag会自动生成目录，将运行结果分类 目录是 design_tag/network_tag/load_tag/
-    design_tag='manta_data_forpaper3',
+    design_tag='manta_complete',
     network_tag='geo',
     load_tag='balanced_100_50',
 ):
@@ -318,7 +318,7 @@ def cloudlab_remote(
         'rate_type': 'balanced',
         # 'rate': [110000,120000,140000],
         # 'rate': [60000, 40000],
-        'rate': [40000, 60000, 80000, 100000, 110000,120000, 140000],
+        'rate': [120000],
         # 'rate': [110000],
         'tx_size': 512,
         'duration': 120,
