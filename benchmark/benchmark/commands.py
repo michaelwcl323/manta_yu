@@ -57,7 +57,17 @@ class CommandMaker:
 
     @staticmethod
     def kill():
-        return 'tmux kill-server'
+        return (
+            'pkill -TERM -f "[b]enchmark_client" 2>/dev/null || true ; '
+            'pkill -TERM -f "[n]ode.*primary" 2>/dev/null || true ; '
+            'pkill -TERM -f "[n]ode.*worker" 2>/dev/null || true ; '
+            'sleep 2 ; '
+            'pkill -KILL -f "[b]enchmark_client" 2>/dev/null || true ; '
+            'pkill -KILL -f "[n]ode.*primary" 2>/dev/null || true ; '
+            'pkill -KILL -f "[n]ode.*worker" 2>/dev/null || true ; '
+            'tmux kill-server 2>/dev/null || true ; '
+            'sleep 1'
+        )
 
     @staticmethod
     def alias_binaries(origin):

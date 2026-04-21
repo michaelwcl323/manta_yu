@@ -127,6 +127,13 @@ class LogParser:
         tmp = findall(r'\[(.*Z) .* Committed B\d+\([^ ]+\) -> ([^ ]+=)', log)
         tmp = [(d, self._to_posix(t)) for t, d in tmp]
         commits = self._merge_results([tmp])
+        if not commits:
+            tmp = findall(
+                r'\[(.*Z) .* DAG_COMMITTED round=\d+ node=\d+ digest=([^ ]+)',
+                log
+            )
+            tmp = [(d, self._to_posix(t)) for t, d in tmp]
+            commits = self._merge_results([tmp])
 
         configs = {
             'header_size': int(
@@ -177,24 +184,38 @@ class LogParser:
     def _consensus_throughput(self):
         if not self.commits:
             return 0, 0, 0
-        start, end = min(self.proposals.values()), max(self.commits.values())
+        if self.proposals:
+            start = min(self.proposals.values())
+        else:
+            start = min(self.commits.values())
+        end = max(self.commits.values())
         duration = end - start
+        if duration <= 0:
+            return 0, 0, 0
         bytes = sum(self.sizes.values())
         bps = bytes / duration
         tps = bps / self.size[0]
         return tps, bps, duration
 
     def _consensus_latency(self):
-        latency = [c - self.proposals[d] for d, c in self.commits.items()]
+        latency = [c - self.proposals[d] for d, c in self.commits.items()
+                   if d in self.proposals]
         return mean(latency) if latency else 0
 
     def _end_to_end_throughput(self):
         if not self.commits:
             return 0, 0, 0
         start_candidates = [x for x in self.start if x is not None]
-        start = min(start_candidates) if start_candidates else min(self.proposals.values())
+        if start_candidates:
+            start = min(start_candidates)
+        elif self.proposals:
+            start = min(self.proposals.values())
+        else:
+            start = min(self.commits.values())
         end = max(self.commits.values())
         duration = end - start
+        if duration <= 0:
+            return 0, 0, 0
         bytes = sum(self.sizes.values())
         bps = bytes / duration
         tps = bps / self.size[0]
@@ -212,6 +233,22 @@ class LogParser:
         return mean(latency) if latency else 0
 
     def result(self):
+        if not self.commits:
+            Print.warn(
+                "No commit lines found in primary logs; "
+                'consensus TPS will be 0 unless the binary logs a supported format.'
+            )
+        elif not self.sizes:
+            Print.warn(
+                'Committed DAG vertices were found, but no batch size records '
+                'were present in worker logs; throughput remains 0.'
+            )
+        if self.commits and not self.proposals:
+            Print.warn(
+                'Commit timestamps were recovered from DAG logs, but proposal '
+                'timestamps are unavailable; consensus latency is reported as 0.'
+            )
+
         header_size = self.configs[0]['header_size']
         max_header_delay = self.configs[0]['max_header_delay']
         gc_depth = self.configs[0]['gc_depth']
@@ -265,8 +302,10 @@ class LogParser:
         parent = dirname(filename)
         if parent:
             makedirs(parent, exist_ok=True)
+        body = self.result()
         with open(filename, 'w') as f:
-            f.write(self.result())
+            f.write(body)
+        Print.info(body)
 
     @classmethod
     def process(cls, directory, faults=0, default_client_size=None,

@@ -142,26 +142,30 @@ def remote(ctx, debug=False):
         Print.error('AWS benchmark support is not available (remote dependencies may not be installed)')
         return
     bench_params = {
-        'faults': 3,
-        'nodes': [10],
+        'faults': 0,
+        'nodes': [50],
         'workers': 1,
         'collocate': True,
-        'rate': [10_000, 110_000],
+        'rate_type': 'balanced',
+        'design_tag': 'manta_experiment3_test',
+        'network_tag': 'geo',
+        'rate': [80000],
         'tx_size': 512,
-        'duration': 300,
-        'runs': 2,
+        'duration': 120,
+        'runs': 1,
     }
     node_params = {
         'header_size': 1_000,  # bytes
-        'max_header_delay': 200,  # ms
+        'max_header_delay': 50,  # ms
         'gc_depth': 50,  # rounds
-        'sync_retry_delay': 10_000,  # ms
-        'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': 500_000,  # bytes
-        'max_batch_delay': 200,  # ms
-        'solid_step_length': 2,
-        'solid_step_number': 1,
-        'reference': 3,
+        'sync_retry_delay': 1000,  # ms
+        'sync_retry_nodes': 33,  # number of nodes
+        'batch_size': 500000,  # bytes
+        'max_batch_delay': 50,  # ms
+        'sigma': 2,
+        'kappa': 2,
+        'reference': 17,
+        'coverage': 33,
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug)
@@ -284,7 +288,7 @@ def cloudlab_remote(ctx, debug=False, sigma=1, kappa=2):
         'nodes': [10],
         'workers': 1,
         'collocate': True,
-        'design_tag': 'tusk_data_forpaper',
+        'design_tag': 'narwhal_experiment3',
         'network_tag': 'no_delay_100_50',
         'rate_type': 'balanced',
         'rate': [40000,60000,80000,100000,120000,140000,160000],

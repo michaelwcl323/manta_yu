@@ -1,6 +1,6 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
 from collections import defaultdict, OrderedDict
 from time import sleep
 
@@ -217,9 +217,20 @@ class InstanceManager:
             raise BenchError(AWSError(e))
 
     def hosts(self, flat=False):
+        static = self.settings.static_hosts_by_region
+        if static:
+            if flat:
+                return [x for y in static.values() for x in y]
+            return OrderedDict(static)
+
         try:
             _, ips = self._get(['pending', 'running'])
             return [x for y in ips.values() for x in y] if flat else ips
+        except NoCredentialsError as e:
+            raise BenchError(
+                'AWS credentials not configured. Add a "hosts" field in settings.json '
+                '(list of IP strings, or region -> list of IPs), or configure credentials / IAM role.'
+            ) from e
         except ClientError as e:
             raise BenchError('Failed to gather instances IPs', AWSError(e))
 

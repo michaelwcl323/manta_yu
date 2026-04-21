@@ -1044,7 +1044,8 @@ class CloudLabBench:
         
         return committee
     
-    def _logs(self, committee, faults, max_workers=1):
+    def _logs(self, committee, faults, max_workers=1, total_rate=None,
+              tx_size=None, design_tag=None, network_tag=None):
         """Download logs from all hosts using download_logs.py"""
         Print.info('Downloading logs...')
         
@@ -1057,7 +1058,20 @@ class CloudLabBench:
             Print.error('Falling back to basic log download...')
             # Fallback: create logs directory and return parser
             Path(PathMaker.logs_path()).mkdir(parents=True, exist_ok=True)
-            return LogParser.process(PathMaker.logs_path(), faults=faults)
+            default_client_rates = None
+            if total_rate is not None:
+                worker_count = committee.workers()
+                if worker_count > 0:
+                    rate_share = ceil(total_rate / worker_count)
+                    default_client_rates = [rate_share] * worker_count
+            return LogParser.process(
+                PathMaker.logs_path(),
+                faults=faults,
+                default_client_size=tx_size,
+                default_client_rates=default_client_rates,
+                design_tag=design_tag,
+                network_tag=network_tag,
+            )
         
         # Run download_logs.py to download all logs
         try:
@@ -1105,8 +1119,22 @@ class CloudLabBench:
         
         Print.info('=' * 60)
         
-        # Parse and return logs
-        return LogParser.process(PathMaker.logs_path(), faults=faults)
+        # Parse and return logs. If clients failed to start, recover a summary
+        # from the configured client size/rate values.
+        default_client_rates = None
+        if total_rate is not None:
+            worker_count = committee.workers()
+            if worker_count > 0:
+                rate_share = ceil(total_rate / worker_count)
+                default_client_rates = [rate_share] * worker_count
+        return LogParser.process(
+            PathMaker.logs_path(),
+            faults=faults,
+            default_client_size=tx_size,
+            default_client_rates=default_client_rates,
+            design_tag=design_tag,
+            network_tag=network_tag,
+        )
     
     def _background_run(self, host_info, command, log_file):
         """Run a command in the background using nohup on a remote host"""
@@ -1564,7 +1592,15 @@ SCRIPTEOF'''
                             )
                             
                             # Download and parse logs
-                            result = self._logs(committee_copy, bench_parameters.faults, max_workers=bench_parameters.workers)
+                            result = self._logs(
+                                committee_copy,
+                                bench_parameters.faults,
+                                max_workers=bench_parameters.workers,
+                                total_rate=rate,
+                                tx_size=bench_parameters.tx_size,
+                                design_tag=bench_parameters.design_tag,
+                                network_tag=bench_parameters.network_tag,
+                            )
                             result.print(summary_file)
                         except (subprocess.SubprocessError, GroupException, ParseError) as e:
                             self.kill(hosts=selected_hosts)
