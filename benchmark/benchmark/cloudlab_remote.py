@@ -17,6 +17,8 @@ from copy import deepcopy
 import subprocess
 import re
 import shlex
+import sys
+import signal
 
 from benchmark.config import Committee, Key, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker, write_failure_summary
@@ -91,6 +93,57 @@ class CloudLabBench:
         else:
             if output.stderr:
                 raise ExecutionError(output.stderr)
+
+    def _start_resource_monitor(self, output_dir, interval=1.0):
+        """Start local resource monitor process writing into the output directory."""
+        benchmark_dir = Path(__file__).parent.parent
+        monitor_script = benchmark_dir / 'monitor_cloudlab_resources.py'
+        if not monitor_script.exists():
+            Print.warn(f'Resource monitor script not found: {monitor_script}')
+            return None
+
+        cmd = [
+            sys.executable,
+            str(monitor_script),
+            '--settings',
+            'cloudlab_settings.json',
+            '--output-dir',
+            str(output_dir),
+            '--interval',
+            str(interval),
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(benchmark_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            Print.info(f'Started resource monitor (pid={proc.pid})')
+            return proc
+        except Exception as e:
+            Print.warn(f'Failed to start resource monitor: {e}')
+            return None
+
+    def _stop_resource_monitor(self, proc):
+        """Stop local resource monitor process gracefully."""
+        if not proc:
+            return
+        try:
+            if proc.poll() is not None:
+                return
+            proc.send_signal(signal.SIGINT)
+            proc.wait(timeout=10)
+            Print.info('Stopped resource monitor')
+        except Exception:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
     
     def _get_connection_kwargs(self, host_info):
         """Get connection kwargs for a specific host (without port/timeout, passed separately)"""
@@ -1584,12 +1637,18 @@ SCRIPTEOF'''
                             design_tag=bench_parameters.design_tag,
                             network_tag=bench_parameters.network_tag,
                         )
+                        output_dir = Path(summary_file).parent
+                        output_dir.mkdir(parents=True, exist_ok=True)
                         
                         try:
+                            monitor_proc = self._start_resource_monitor(output_dir)
                             # Run the actual benchmark
-                            self._run_single(
-                                rate, committee_copy, bench_parameters, node_parameters, selected_hosts, debug
-                            )
+                            try:
+                                self._run_single(
+                                    rate, committee_copy, bench_parameters, node_parameters, selected_hosts, debug
+                                )
+                            finally:
+                                self._stop_resource_monitor(monitor_proc)
                             
                             # Download and parse logs
                             result = self._logs(

@@ -38,7 +38,7 @@ def local(ctx, debug=False):
         'nodes': 10,
         'workers': 1,
         'rate_type': 'balanced',
-        'rate': 80000,
+        'rate': 120000,
         'tx_size': 512,
         'duration': 20,
     }
@@ -291,10 +291,10 @@ def cloudlab_remote(ctx, debug=False, sigma=1, kappa=2):
         'design_tag': 'narwhal_experiment3',
         'network_tag': 'no_delay_100_50',
         'rate_type': 'balanced',
-        'rate': [40000,60000,80000,100000,120000,140000,160000],
+        'rate': [120000],
         'tx_size': 512,
         'duration': 120,
-        'runs': 2,
+        'runs': 1,
     }
     node_params = {
         'header_size': 1_000,  # bytes
