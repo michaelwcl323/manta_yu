@@ -289,8 +289,8 @@ def cloudlab_remote(
 #    - 只要前面没提交成功，就还要走这一步
 
     enable_fast_coin=False, # fast-coin commit 第二轮结束提交
-    solid_commit_trigger_on_solid_step=True, # r3 commit 第三轮结束提交，在收到第一个第四轮证书后 + solid_candidate_threshold 达到预期
-    enable_commit_recheck=True, # r2 commit  fast_coin_candidate_threshold 达到预期
+    solid_commit_trigger_on_solid_step=False, # r3 commit 第三轮结束提交，在收到第一个第四轮证书后 + solid_candidate_threshold 达到预期
+    enable_commit_recheck=False, # r2 commit  fast_coin_candidate_threshold 达到预期
     fast_coin_candidate_threshold=4,
     solid_candidate_threshold=4,
 
@@ -322,7 +322,7 @@ def cloudlab_remote(
         # 'rate': [110000],
         'tx_size': 512,
         'duration': 120,
-        'runs': 2,       
+        'runs': 1,       
     }
 
     # manta 对以下参数比较敏感 可调整成 50/500_000/50   100/500_000/100  50/128_000/50 80/128_000/35 等等

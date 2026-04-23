@@ -17,6 +17,8 @@ from copy import deepcopy
 import subprocess
 import re
 import shlex
+import sys
+import signal
 
 from benchmark.config import Committee, Key, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker
@@ -91,6 +93,190 @@ class CloudLabBench:
         else:
             if output.stderr:
                 raise ExecutionError(output.stderr)
+
+    def _start_resource_monitor(self, run_dir, interval=1.0):
+        """Start local resource monitor process writing into this run directory."""
+        benchmark_dir = Path(__file__).parent.parent
+        monitor_script = benchmark_dir / 'monitor_cloudlab_resources.py'
+        if not monitor_script.exists():
+            Print.warn(f'Resource monitor script not found: {monitor_script}')
+            return None
+
+        cmd = [
+            sys.executable,
+            str(monitor_script),
+            '--settings',
+            'cloudlab_settings.json',
+            '--output-dir',
+            str(run_dir),
+            '--interval',
+            str(interval),
+        ]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(benchmark_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            Print.info(f'Started resource monitor (pid={proc.pid})')
+            return proc
+        except Exception as e:
+            Print.warn(f'Failed to start resource monitor: {e}')
+            return None
+
+    def _stop_resource_monitor(self, proc):
+        """Stop local resource monitor process gracefully."""
+        if not proc:
+            return
+        try:
+            if proc.poll() is not None:
+                return
+            proc.send_signal(signal.SIGINT)
+            proc.wait(timeout=10)
+            Print.info('Stopped resource monitor')
+        except Exception:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def _start_remote_resource_monitors(self, hosts):
+        """Start per-host remote CPU/BW monitor writers in repo/logs directory."""
+        repo_name = self.settings.repo_name
+        host_info = self.manager.get_host_info()
+        host_dict = {h['hostname']: h for h in host_info}
+
+        # Keep one monitor process per physical host.
+        unique_hosts = []
+        seen = set()
+        for h in hosts:
+            hostname = h['hostname'] if isinstance(h, dict) else str(h)
+            if hostname not in seen:
+                seen.add(hostname)
+                unique_hosts.append(host_dict.get(hostname, {'hostname': hostname}))
+
+        started = []
+        for host in unique_hosts:
+            username = host.get('username', 'root')
+            hostname = host['hostname']
+            port = host.get('port', 22)
+            conn_kwargs = self._get_connection_kwargs({})
+            c = Connection(
+                hostname,
+                user=username,
+                port=port,
+                connect_kwargs=conn_kwargs,
+                connect_timeout=30,
+            )
+            try:
+                cmd = f'''
+                    set -e
+                    cd {repo_name}
+                    mkdir -p logs
+                    nohup bash -lc '
+                        while true; do
+                            TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                            CPU_LINE=$(sed -n "1p" /proc/stat)
+                            NET_LINES=$(cat /proc/net/dev)
+                            printf "%s|%s\\n" "$TS" "$CPU_LINE" >> logs/resource-cpu.raw
+                            printf "%s|BEGIN_NET\\n%s\\n%s|END_NET\\n" "$TS" "$NET_LINES" "$TS" >> logs/resource-net.raw
+                            sleep 1
+                        done
+                    ' >/dev/null 2>&1 &
+                    echo $! > logs/resource-monitor.pid
+                    echo started
+                '''
+                r = c.run(cmd, hide=True, warn=True, shell='/bin/bash')
+                if r.ok:
+                    started.append(host)
+                    Print.info(f'Started remote monitor on {hostname}')
+                else:
+                    Print.warn(f'Failed starting remote monitor on {hostname}: {r.stderr}')
+            except Exception as e:
+                Print.warn(f'Failed starting remote monitor on {hostname}: {e}')
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        return started
+
+    def _stop_remote_resource_monitors(self, hosts):
+        """Stop remote monitors and keep raw logs under repo/logs."""
+        repo_name = self.settings.repo_name
+        for host in hosts:
+            username = host.get('username', 'root')
+            hostname = host['hostname']
+            port = host.get('port', 22)
+            conn_kwargs = self._get_connection_kwargs({})
+            c = Connection(
+                hostname,
+                user=username,
+                port=port,
+                connect_kwargs=conn_kwargs,
+                connect_timeout=30,
+            )
+            try:
+                cmd = f'''
+                    cd {repo_name} || exit 0
+                    if [ -f logs/resource-monitor.pid ]; then
+                        PID=$(cat logs/resource-monitor.pid 2>/dev/null || true)
+                        if [ -n "$PID" ]; then
+                            kill -INT "$PID" 2>/dev/null || kill "$PID" 2>/dev/null || true
+                        fi
+                        rm -f logs/resource-monitor.pid
+                    fi
+                    pkill -f "resource-cpu.raw|resource-net.raw" 2>/dev/null || true
+                    echo stopped
+                '''
+                c.run(cmd, hide=True, warn=True, shell='/bin/bash')
+                Print.info(f'Stopped remote monitor on {hostname}')
+            except Exception as e:
+                Print.warn(f'Failed stopping remote monitor on {hostname}: {e}')
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+    def _download_remote_resource_logs(self, hosts):
+        """Download remote raw monitor logs into current run directory logs/."""
+        local_logs_dir = Path(PathMaker.logs_path())
+        local_logs_dir.mkdir(parents=True, exist_ok=True)
+        repo_name = self.settings.repo_name
+
+        for idx, host in enumerate(hosts):
+            username = host.get('username', 'root')
+            hostname = host['hostname']
+            port = host.get('port', 22)
+            conn_kwargs = self._get_connection_kwargs({})
+            c = Connection(
+                hostname,
+                user=username,
+                port=port,
+                connect_kwargs=conn_kwargs,
+                connect_timeout=30,
+            )
+            try:
+                remote_cpu = f'{repo_name}/logs/resource-cpu.raw'
+                remote_net = f'{repo_name}/logs/resource-net.raw'
+                local_cpu = local_logs_dir / f'resource-cpu-{idx}.raw'
+                local_net = local_logs_dir / f'resource-net-{idx}.raw'
+                c.get(remote_cpu, str(local_cpu))
+                c.get(remote_net, str(local_net))
+                Print.info(f'Downloaded remote monitor logs from {hostname}')
+            except Exception as e:
+                Print.warn(f'Could not download resource logs from {hostname}: {e}')
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
     
     def _get_connection_kwargs(self, host_info):
         """Get connection kwargs for a specific host (without port/timeout, passed separately)"""
@@ -1637,18 +1823,32 @@ SCRIPTEOF'''
                                 run_dir=run_dir,
                             )
                             Print.info(f'Run outputs directory: {run_dir}')
+                            monitor_proc = self._start_resource_monitor(run_dir)
+                            remote_monitor_hosts = self._start_remote_resource_monitors(selected_hosts)
                             # Run the actual benchmark
-                            self._run_single(
-                                rate, committee_copy, bench_parameters, node_parameters, selected_hosts, debug
-                            )
-                            
-                            # Download logs, then process them once and save summary.txt.
-                            self._logs(
-                                committee_copy,
-                                bench_parameters.faults,
-                                max_workers=bench_parameters.workers,
-                            )
-                            PathMaker.export_run_artifacts()
+                            try:
+                                self._run_single(
+                                    rate,
+                                    committee_copy,
+                                    bench_parameters,
+                                    node_parameters,
+                                    selected_hosts,
+                                    debug,
+                                )
+
+                                # Download logs, then process them once and save summary.txt.
+                                self._logs(
+                                    committee_copy,
+                                    bench_parameters.faults,
+                                    max_workers=bench_parameters.workers,
+                                )
+                                PathMaker.export_run_artifacts()
+                            finally:
+                                # _run_single already kills remote benchmark processes at the end.
+                                # Stop monitoring right after those processes are gone.
+                                self._stop_remote_resource_monitors(remote_monitor_hosts)
+                                self._download_remote_resource_logs(remote_monitor_hosts)
+                                self._stop_resource_monitor(monitor_proc)
                         except (subprocess.SubprocessError, GroupException, ParseError) as e:
                             self.kill(hosts=selected_hosts)
                             if isinstance(e, GroupException):
