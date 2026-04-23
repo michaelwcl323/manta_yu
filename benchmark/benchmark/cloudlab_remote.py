@@ -19,6 +19,7 @@ import re
 import shlex
 import sys
 import signal
+import os
 
 from benchmark.config import Committee, Key, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker, write_failure_summary
@@ -144,6 +145,189 @@ class CloudLabBench:
                     proc.kill()
                 except Exception:
                     pass
+
+    def _start_remote_resource_monitors(self, hosts):
+        """Start per-host remote CPU/BW monitor writers in repo/logs directory."""
+        repo_name = self.settings.repo_name
+        host_info = self.manager.get_host_info()
+        host_dict = {h['hostname']: h for h in host_info}
+
+        unique_hosts = []
+        seen = set()
+        for h in hosts:
+            hostname = h['hostname'] if isinstance(h, dict) else str(h)
+            if hostname not in seen:
+                seen.add(hostname)
+                unique_hosts.append(host_dict.get(hostname, {'hostname': hostname}))
+
+        started = []
+        for host in unique_hosts:
+            username = host.get('username', 'root')
+            hostname = host['hostname']
+            port = host.get('port', 22)
+            conn_kwargs = self._get_connection_kwargs({})
+            c = Connection(
+                hostname,
+                user=username,
+                port=port,
+                connect_kwargs=conn_kwargs,
+                connect_timeout=30,
+            )
+            try:
+                cmd = f'''
+                    set -e
+                    cd {repo_name}
+                    mkdir -p logs
+                    nohup bash -lc '
+                        while true; do
+                            TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                            CPU_LINE=$(sed -n "1p" /proc/stat)
+                            NET_LINES=$(cat /proc/net/dev)
+                            printf "%s|%s\\n" "$TS" "$CPU_LINE" >> logs/resource-cpu.raw
+                            printf "%s|BEGIN_NET\\n%s\\n%s|END_NET\\n" "$TS" "$NET_LINES" "$TS" >> logs/resource-net.raw
+                            sleep 1
+                        done
+                    ' >/dev/null 2>&1 &
+                    echo $! > logs/resource-monitor.pid
+                    echo started
+                '''
+                r = c.run(cmd, hide=True, warn=True, shell='/bin/bash')
+                if r.ok:
+                    started.append(host)
+                    Print.info(f'Started remote monitor on {hostname}')
+                else:
+                    Print.warn(f'Failed starting remote monitor on {hostname}: {r.stderr}')
+            except Exception as e:
+                Print.warn(f'Failed starting remote monitor on {hostname}: {e}')
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        return started
+
+    def _stop_remote_resource_monitors(self, hosts):
+        """Stop remote monitors and keep raw logs under repo/logs."""
+        repo_name = self.settings.repo_name
+        for host in hosts:
+            username = host.get('username', 'root')
+            hostname = host['hostname']
+            port = host.get('port', 22)
+            conn_kwargs = self._get_connection_kwargs({})
+            c = Connection(
+                hostname,
+                user=username,
+                port=port,
+                connect_kwargs=conn_kwargs,
+                connect_timeout=30,
+            )
+            try:
+                cmd = f'''
+                    cd {repo_name} || exit 0
+                    if [ -f logs/resource-monitor.pid ]; then
+                        PID=$(cat logs/resource-monitor.pid 2>/dev/null || true)
+                        if [ -n "$PID" ]; then
+                            kill -INT "$PID" 2>/dev/null || kill "$PID" 2>/dev/null || true
+                        fi
+                        rm -f logs/resource-monitor.pid
+                    fi
+                    pkill -f "resource-cpu.raw|resource-net.raw" 2>/dev/null || true
+                    echo stopped
+                '''
+                c.run(cmd, hide=True, warn=True, shell='/bin/bash')
+                Print.info(f'Stopped remote monitor on {hostname}')
+            except Exception as e:
+                Print.warn(f'Failed stopping remote monitor on {hostname}: {e}')
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+    def _download_remote_resource_logs(self, hosts):
+        """Download remote raw monitor logs into current run directory logs/."""
+        local_logs_dir = Path(PathMaker.logs_path())
+        local_logs_dir.mkdir(parents=True, exist_ok=True)
+        repo_name = self.settings.repo_name
+
+        for idx, host in enumerate(hosts):
+            username = host.get('username', 'root')
+            hostname = host['hostname']
+            port = host.get('port', 22)
+            conn_kwargs = self._get_connection_kwargs({})
+            c = Connection(
+                hostname,
+                user=username,
+                port=port,
+                connect_kwargs=conn_kwargs,
+                connect_timeout=30,
+            )
+            try:
+                remote_cpu = f'{repo_name}/logs/resource-cpu.raw'
+                remote_net = f'{repo_name}/logs/resource-net.raw'
+                local_cpu = local_logs_dir / f'resource-cpu-{idx}.raw'
+                local_net = local_logs_dir / f'resource-net-{idx}.raw'
+                c.get(remote_cpu, str(local_cpu))
+                c.get(remote_net, str(local_net))
+                Print.info(f'Downloaded remote monitor logs from {hostname}')
+            except Exception as e:
+                Print.warn(f'Could not download resource logs from {hostname}: {e}')
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+    def _postprocess_resource_plots(self, run_dir, duration_seconds):
+        """Generate avg-over-time CSV/TXT and plots for this run directory."""
+        benchmark_dir = Path(__file__).parent.parent
+        usage_csv = Path(run_dir) / 'resource_usage.csv'
+        if not usage_csv.exists():
+            Print.warn(f'Resource usage CSV not found: {usage_csv}')
+            return
+
+        summarize_script = benchmark_dir / 'summarize_resource_over_time.py'
+        plot_script = benchmark_dir / 'plot_avg_resource.py'
+        if not summarize_script.exists() or not plot_script.exists():
+            Print.warn('Resource summary/plot scripts not found; skipping post-processing')
+            return
+
+        try:
+            summarize_cmd = [
+                sys.executable,
+                str(summarize_script),
+                '--csv',
+                str(usage_csv),
+                '--link-capacity-mbps',
+                '1000',
+                '--window-seconds',
+                str(duration_seconds),
+            ]
+            subprocess.run(
+                summarize_cmd,
+                cwd=str(benchmark_dir),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            avg_csv = Path(run_dir) / 'resource_usage_avg_over_time.csv'
+            plot_cmd = [
+                sys.executable,
+                str(plot_script),
+                '--csv',
+                str(avg_csv),
+            ]
+            subprocess.run(
+                plot_cmd,
+                cwd=str(benchmark_dir),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            Print.info('Generated average resource usage plots')
+        except subprocess.CalledProcessError as e:
+            Print.warn(f'Failed to generate resource plots: {(e.stderr or e.stdout or str(e)).strip()}')
     
     def _get_connection_kwargs(self, host_info):
         """Get connection kwargs for a specific host (without port/timeout, passed separately)"""
@@ -1435,7 +1619,16 @@ SCRIPTEOF'''
         
         return None
     
-    def _run_single(self, rate, committee, bench_parameters, node_parameters, selected_hosts, debug=False):
+    def _run_single(
+        self,
+        rate,
+        committee,
+        bench_parameters,
+        node_parameters,
+        selected_hosts,
+        debug=False,
+        on_benchmark_start=None,
+    ):
         """Run a single benchmark iteration (CloudLab), mirroring logic from Bench._run_single"""
         from time import sleep
 
@@ -1533,6 +1726,10 @@ SCRIPTEOF'''
                 log_file = PathMaker.worker_log_file(i, id)
                 self._background_run(host_info, cmd, log_file)
 
+        # Start resource monitoring only after all benchmark processes are launched.
+        if on_benchmark_start is not None:
+            on_benchmark_start()
+
         # 5. Wait for all transactions to be processed (progress output)
         duration = bench_parameters.duration
         Print.info(f'Running benchmark ({duration} sec)...')
@@ -1626,49 +1823,123 @@ SCRIPTEOF'''
                     for run in range(bench_parameters.runs):
                         attack_str = f", attack={'ON' if trigger_attack else 'OFF'}" if trigger_attack is not None else ""
                         Print.heading(f'\nRunning benchmark: nodes={n}, rate={rate}{attack_str}, run={run+1}/{bench_parameters.runs}')
-                        summary_file = PathMaker.summary_file(
-                            bench_parameters.faults,
-                            n,
-                            bench_parameters.workers,
-                            bench_parameters.collocate,
-                            rate,
-                            bench_parameters.tx_size,
-                            run + 1,
-                            design_tag=bench_parameters.design_tag,
-                            network_tag=bench_parameters.network_tag,
-                        )
-                        output_dir = Path(summary_file).parent
-                        output_dir.mkdir(parents=True, exist_ok=True)
-                        
+                        os.environ.pop(PathMaker.RUN_DIR_ENV, None)
+                        design_tag = bench_parameters.design_tag or node_parameters.json.get('design_tag')
+                        network_tag = bench_parameters.network_tag or node_parameters.json.get('network_tag')
+                        load_tag = node_parameters.json.get('load_tag')
+                        summary_file = None
                         try:
-                            monitor_proc = self._start_resource_monitor(output_dir)
-                            # Run the actual benchmark
-                            try:
-                                self._run_single(
-                                    rate, committee_copy, bench_parameters, node_parameters, selected_hosts, debug
-                                )
-                            finally:
-                                self._stop_resource_monitor(monitor_proc)
-                            
-                            # Download and parse logs
-                            result = self._logs(
-                                committee_copy,
-                                bench_parameters.faults,
-                                max_workers=bench_parameters.workers,
-                                total_rate=rate,
-                                tx_size=bench_parameters.tx_size,
-                                design_tag=bench_parameters.design_tag,
-                                network_tag=bench_parameters.network_tag,
+                            run_label = f'cloudlab-n{n}-r{rate}-run{run+1}'
+                            if design_tag:
+                                run_label += f'-tag-{design_tag}'
+                            if trigger_attack is not None:
+                                run_label += f'-attack-{"on" if trigger_attack else "off"}'
+
+                            run_dir = PathMaker.create_run_directory(
+                                run_label,
+                                design_tag=design_tag,
+                                network_tag=network_tag,
+                                load_tag=load_tag,
                             )
-                            result.print(summary_file)
+                            PathMaker.update_run_metadata(
+                                {
+                                    'benchmark_type': 'cloudlab',
+                                    'bench_params': {
+                                        'faults': bench_parameters.faults,
+                                        'nodes': n,
+                                        'workers': bench_parameters.workers,
+                                        'collocate': bench_parameters.collocate,
+                                        'rate': rate,
+                                        'rate_type': getattr(bench_parameters, 'rate_type', None),
+                                        'tx_size': bench_parameters.tx_size,
+                                        'duration': bench_parameters.duration,
+                                        'run': run + 1,
+                                    },
+                                    'node_params': {
+                                        key: value
+                                        for key, value in node_parameters.json.items()
+                                        if key != 'ssh_key_password'
+                                    },
+                                },
+                                run_dir=run_dir,
+                            )
+                            Print.info(f'Run outputs directory: {run_dir}')
+
+                            monitor_proc = None
+                            remote_monitor_hosts = []
+
+                            def _start_monitors_after_boot():
+                                nonlocal monitor_proc, remote_monitor_hosts
+                                if monitor_proc is None:
+                                    monitor_proc = self._start_resource_monitor(run_dir)
+                                if not remote_monitor_hosts:
+                                    remote_monitor_hosts = self._start_remote_resource_monitors(selected_hosts)
+
+                            summary_file = PathMaker.summary_file(
+                                bench_parameters.faults,
+                                n,
+                                bench_parameters.workers,
+                                bench_parameters.collocate,
+                                rate,
+                                bench_parameters.tx_size,
+                                run + 1,
+                                design_tag=design_tag,
+                                network_tag=network_tag,
+                            )
+
+                            try:
+                                try:
+                                    self._run_single(
+                                        rate,
+                                        committee_copy,
+                                        bench_parameters,
+                                        node_parameters,
+                                        selected_hosts,
+                                        debug,
+                                        on_benchmark_start=_start_monitors_after_boot,
+                                    )
+                                finally:
+                                    self._stop_remote_resource_monitors(remote_monitor_hosts)
+                                    self._download_remote_resource_logs(remote_monitor_hosts)
+                                    self._stop_resource_monitor(monitor_proc)
+
+                                self._postprocess_resource_plots(run_dir, bench_parameters.duration)
+
+                                # Download and parse logs
+                                result = self._logs(
+                                    committee_copy,
+                                    bench_parameters.faults,
+                                    max_workers=bench_parameters.workers,
+                                    total_rate=rate,
+                                    tx_size=bench_parameters.tx_size,
+                                    design_tag=design_tag,
+                                    network_tag=network_tag,
+                                )
+                                result.print(summary_file)
+                                PathMaker.export_run_artifacts()
+                            finally:
+                                self._stop_remote_resource_monitors(remote_monitor_hosts)
+                                self._stop_resource_monitor(monitor_proc)
                         except (subprocess.SubprocessError, GroupException, ParseError) as e:
                             self.kill(hosts=selected_hosts)
                             if isinstance(e, GroupException):
                                 e = FabricError(e)
+                            if summary_file is None:
+                                summary_file = PathMaker.summary_file(
+                                    bench_parameters.faults,
+                                    n,
+                                    bench_parameters.workers,
+                                    bench_parameters.collocate,
+                                    rate,
+                                    bench_parameters.tx_size,
+                                    run + 1,
+                                    design_tag=design_tag,
+                                    network_tag=network_tag,
+                                )
                             write_failure_summary(
                                 summary_file,
-                                design_tag=bench_parameters.design_tag,
-                                network_tag=bench_parameters.network_tag,
+                                design_tag=design_tag,
+                                network_tag=network_tag,
                                 faults=bench_parameters.faults,
                                 nodes=n,
                                 workers=bench_parameters.workers,

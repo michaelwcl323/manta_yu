@@ -291,7 +291,7 @@ def cloudlab_remote(ctx, debug=False, sigma=1, kappa=2):
         'design_tag': 'narwhal_experiment3',
         'network_tag': 'no_delay_100_50',
         'rate_type': 'balanced',
-        'rate': [120000],
+        'rate': [100000],
         'tx_size': 512,
         'duration': 120,
         'runs': 1,

@@ -1,8 +1,12 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
+import json
+import os
+import re
+import shutil
 from datetime import datetime
 from os import makedirs
-from os.path import join
 from os.path import dirname
+from os.path import join
 
 
 class BenchError(Exception):
@@ -14,11 +18,19 @@ class BenchError(Exception):
 
 
 class PathMaker:
+    RUN_DIR_ENV = 'MANTA_RUN_DIR'
+    LATEST_RUN_FILE = '.latest_run'
+
     @staticmethod
     def _tag_segment(value, default):
         value = str(value).strip() if value is not None else ''
         value = value.replace(' ', '_')
         return value or default
+
+    @staticmethod
+    def _sanitize_label(label):
+        label = re.sub(r'[^A-Za-z0-9._-]+', '-', label.strip())
+        return label.strip('-') or 'run'
 
     @staticmethod
     def binary_path():
@@ -50,7 +62,16 @@ class PathMaker:
 
     @staticmethod
     def logs_path():
-        return 'logs'
+        run_dir = PathMaker.current_run_path()
+        return join(run_dir, 'logs') if run_dir else 'logs'
+
+    @staticmethod
+    def reset_logs_path():
+        logs_dir = PathMaker.logs_path()
+        if os.path.isdir(logs_dir):
+            shutil.rmtree(logs_dir)
+        os.makedirs(logs_dir, exist_ok=True)
+        return logs_dir
 
     @staticmethod
     def primary_log_file(i):
@@ -71,7 +92,126 @@ class PathMaker:
 
     @staticmethod
     def results_path():
-        return 'results'
+        run_dir = PathMaker.current_run_path()
+        return run_dir if run_dir else 'results'
+
+    @staticmethod
+    def base_results_path():
+        return 'manta_result'
+
+    @staticmethod
+    def tagged_results_path(design_tag=None, network_tag=None, load_tag=None):
+        parts = [PathMaker.base_results_path()]
+        for tag in (design_tag, network_tag, load_tag):
+            if tag is not None:
+                parts.append(PathMaker._sanitize_label(str(tag)))
+        return join(*parts)
+
+    @staticmethod
+    def latest_run_file():
+        return join(PathMaker.base_results_path(), PathMaker.LATEST_RUN_FILE)
+
+    @staticmethod
+    def current_run_path():
+        run_dir = os.environ.get(PathMaker.RUN_DIR_ENV)
+        if run_dir:
+            return run_dir
+
+        latest_run_file = PathMaker.latest_run_file()
+        if os.path.exists(latest_run_file):
+            with open(latest_run_file, 'r') as f:
+                run_dir = f.read().strip()
+            return run_dir or None
+        return None
+
+    @staticmethod
+    def activate_run_directory(run_dir):
+        assert isinstance(run_dir, str) and run_dir
+        os.makedirs(run_dir, exist_ok=True)
+        os.environ[PathMaker.RUN_DIR_ENV] = run_dir
+
+        os.makedirs(PathMaker.base_results_path(), exist_ok=True)
+        with open(PathMaker.latest_run_file(), 'w') as f:
+            f.write(run_dir)
+        return run_dir
+
+    @staticmethod
+    def run_metadata_file(run_dir=None):
+        run_dir = run_dir or PathMaker.current_run_path()
+        return join(run_dir, 'run_metadata.json') if run_dir else None
+
+    @staticmethod
+    def load_run_metadata(run_dir=None):
+        metadata_file = PathMaker.run_metadata_file(run_dir)
+        if metadata_file is None or not os.path.exists(metadata_file):
+            return {}
+
+        with open(metadata_file, 'r') as f:
+            return json.load(f)
+
+    @staticmethod
+    def update_run_metadata(extra_metadata, run_dir=None):
+        assert isinstance(extra_metadata, dict)
+
+        run_dir = run_dir or PathMaker.current_run_path()
+        if not run_dir:
+            return {}
+
+        os.makedirs(run_dir, exist_ok=True)
+        metadata = PathMaker.load_run_metadata(run_dir)
+        for key, value in extra_metadata.items():
+            if isinstance(value, dict) and isinstance(metadata.get(key), dict):
+                metadata[key].update(value)
+            else:
+                metadata[key] = value
+
+        metadata_file = PathMaker.run_metadata_file(run_dir)
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+            f.write('\n')
+        return metadata
+
+    @staticmethod
+    def create_run_directory(
+        label='run',
+        design_tag=None,
+        network_tag=None,
+        load_tag=None,
+    ):
+        safe_label = PathMaker._sanitize_label(label)
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')
+        base_dir = PathMaker.tagged_results_path(
+            design_tag=design_tag,
+            network_tag=network_tag,
+            load_tag=load_tag,
+        )
+        os.makedirs(base_dir, exist_ok=True)
+
+        run_dir = join(base_dir, f'{timestamp}_{safe_label}')
+        counter = 1
+        while os.path.exists(run_dir):
+            counter += 1
+            run_dir = join(base_dir, f'{timestamp}_{safe_label}_{counter}')
+
+        PathMaker.activate_run_directory(run_dir)
+        PathMaker.update_run_metadata(
+            {
+                'created_at_utc': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+                'label': safe_label,
+                'run_dir': run_dir,
+                'design_tag': PathMaker._sanitize_label(str(design_tag))
+                if design_tag is not None
+                else None,
+                'network_tag': PathMaker._sanitize_label(str(network_tag))
+                if network_tag is not None
+                else None,
+                'load_tag': PathMaker._sanitize_label(str(load_tag))
+                if load_tag is not None
+                else None,
+            },
+            run_dir=run_dir,
+        )
+        return run_dir
 
     @staticmethod
     def summary_path(design_tag=None, network_tag=None):
@@ -96,13 +236,15 @@ class PathMaker:
         design_segment = PathMaker._tag_segment(design_tag, 'untagged_design')
         network_segment = PathMaker._tag_segment(network_tag, 'untagged_network')
         stamp = timestamp or datetime.now().strftime('%Y%m%d_%H%M%S')
-        return join(
+        filename = (
+            f'summary_design-{design_segment}_network-{network_segment}'
+            f'_f{faults}_n{nodes}_w{workers}_c{collocate}'
+            f'_r{rate}_tx{tx_size}_run{run}_{stamp}.txt'
+        )
+        run_dir = PathMaker.current_run_path()
+        return join(run_dir, filename) if run_dir else join(
             PathMaker.summary_path(design_segment, network_segment),
-            (
-                f'summary_design-{design_segment}_network-{network_segment}'
-                f'_f{faults}_n{nodes}_w{workers}_c{collocate}'
-                f'_r{rate}_tx{tx_size}_run{run}_{stamp}.txt'
-            ),
+            filename,
         )
 
     @staticmethod
@@ -120,6 +262,10 @@ class PathMaker:
     @staticmethod
     def plot_file(name, ext):
         return join(PathMaker.plots_path(), f'{name}.{ext}')
+
+    @staticmethod
+    def export_run_artifacts():
+        return {}
 
 
 class Color:
