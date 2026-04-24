@@ -1,0 +1,13 @@
+Average resource usage over time (all nodes)
+Input CSV: /users/michael9/manta_yu/benchmark/manta_result/tusk_overhead/no_delay_100_50/20260423_173453_406267_cloudlab-n10-r100000-run1-tag-tusk_overhead/resource_usage.csv
+Link capacity per node: 1000.000 Mbps
+Window seconds: 120.000
+Bandwidth percent formula: (avg_rx_mbps + avg_tx_mbps) / (2 * link_capacity_mbps) * 100
+
+Time points: 120
+Overall avg CPU usage: 8.106%
+Overall avg bandwidth used: 38.399%
+Peak avg CPU usage: 9.051%
+Peak avg bandwidth used: 41.007%
+
+Detailed time series: /users/michael9/manta_yu/benchmark/manta_result/tusk_overhead/no_delay_100_50/20260423_173453_406267_cloudlab-n10-r100000-run1-tag-tusk_overhead/resource_usage_avg_over_time.csv

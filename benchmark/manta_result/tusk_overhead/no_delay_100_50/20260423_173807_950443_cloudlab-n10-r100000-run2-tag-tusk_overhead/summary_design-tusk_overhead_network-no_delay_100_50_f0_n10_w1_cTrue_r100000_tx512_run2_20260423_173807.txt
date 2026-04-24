@@ -1,0 +1,32 @@
+
+-----------------------------------------
+ SUMMARY:
+-----------------------------------------
+ + CONFIG:
+ Design tag: tusk_overhead
+ Network tag: no_delay_100_50
+ Faults: 0 node(s)
+ Committee size: 7 node(s)
+ Worker(s) per node: 1 worker(s)
+ Collocate primary and workers: True
+ Input rate: 60,000 tx/s
+ Transaction size: 512 B
+ Execution time: 122 s
+
+ Header size: 1,000 B
+ Max header delay: 100 ms
+ GC depth: 50 round(s)
+ Sync retry delay: 1,000 ms
+ Sync retry nodes: 4 node(s)
+ batch size: 500,000 B
+ Max batch delay: 50 ms
+
+ + RESULTS:
+ Consensus TPS: 69,394 tx/s
+ Consensus BPS: 35,529,957 B/s
+ Consensus latency: 1,317 ms
+
+ End-to-end TPS: 69,058 tx/s
+ End-to-end BPS: 35,357,639 B/s
+ End-to-end latency: 1,658 ms
+-----------------------------------------

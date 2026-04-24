@@ -288,13 +288,13 @@ def cloudlab_remote(ctx, debug=False, sigma=1, kappa=2):
         'nodes': [10],
         'workers': 1,
         'collocate': True,
-        'design_tag': 'narwhal_experiment3',
+        'design_tag': 'tusk_overhead',
         'network_tag': 'no_delay_100_50',
         'rate_type': 'balanced',
         'rate': [100000],
         'tx_size': 512,
         'duration': 120,
-        'runs': 1,
+        'runs': 3,
     }
     node_params = {
         'header_size': 1_000,  # bytes

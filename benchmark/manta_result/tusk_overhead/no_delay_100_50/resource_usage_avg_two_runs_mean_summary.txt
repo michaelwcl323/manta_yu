@@ -1,0 +1,14 @@
+Two-run mean per time_s (each row: mean of run1 and run2 at same time_s)
+Source run1: manta_result/tusk_overhead/no_delay_100_50/20260423_173453_406267_cloudlab-n10-r100000-run1-tag-tusk_overhead/resource_usage_avg_over_time.csv
+Source run2: manta_result/tusk_overhead/no_delay_100_50/20260423_173807_950443_cloudlab-n10-r100000-run2-tag-tusk_overhead/resource_usage_avg_over_time.csv
+Link capacity per node (for %%): 1000 Mbps
+Formula bandwidth %%: (avg_rx_mbps + avg_tx_mbps) / (2 * link_mbps) * 100
+
+Time points averaged: 120
+
+--- Time average over the merged series (mean of per-time two-run means) ---
+Mean CPU (all nodes avg, then two runs, then time): 8.272 %
+Mean RX (per-node avg, two runs, time): 383.188 Mbps
+Mean TX (per-node avg, two runs, time): 383.066 Mbps
+Mean total throughput RX+TX (same): 766.254 Mbps
+Mean bandwidth utilization %% (link formula above): 38.313 %

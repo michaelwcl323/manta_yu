@@ -1,0 +1,64 @@
+Resource usage summary (per host)
+Generated at: 2026-04-23T17:41:06Z
+Total rows: 1260
+
+michael9@10.10.1.10:22
+  samples      : 125
+  cpu avg/max  : 8.09% / 10.58%
+  rx avg/max   : 396.521 / 474.336 Mbps
+  tx avg/max   : 279.328 / 514.701 Mbps
+
+michael9@10.10.1.1:22
+  samples      : 125
+  cpu avg/max  : 8.63% / 11.07%
+  rx avg/max   : 372.960 / 396.207 Mbps
+  tx avg/max   : 394.973 / 429.292 Mbps
+
+michael9@10.10.1.2:22
+  samples      : 125
+  cpu avg/max  : 8.58% / 11.76%
+  rx avg/max   : 376.296 / 471.940 Mbps
+  tx avg/max   : 395.043 / 426.909 Mbps
+
+michael9@10.10.1.3:22
+  samples      : 125
+  cpu avg/max  : 8.39% / 10.32%
+  rx avg/max   : 367.688 / 391.616 Mbps
+  tx avg/max   : 394.971 / 418.209 Mbps
+
+michael9@10.10.1.4:22
+  samples      : 125
+  cpu avg/max  : 8.57% / 10.99%
+  rx avg/max   : 390.261 / 471.496 Mbps
+  tx avg/max   : 394.938 / 463.214 Mbps
+
+michael9@10.10.1.5:22
+  samples      : 125
+  cpu avg/max  : 8.31% / 10.16%
+  rx avg/max   : 379.807 / 459.098 Mbps
+  tx avg/max   : 395.003 / 498.535 Mbps
+
+michael9@10.10.1.6:22
+  samples      : 125
+  cpu avg/max  : 8.50% / 10.71%
+  rx avg/max   : 365.918 / 397.789 Mbps
+  tx avg/max   : 394.702 / 414.086 Mbps
+
+michael9@10.10.1.7:22
+  samples      : 125
+  cpu avg/max  : 7.81% / 9.69%
+  rx avg/max   : 393.992 / 425.505 Mbps
+  tx avg/max   : 393.813 / 424.285 Mbps
+
+michael9@10.10.1.8:22
+  samples      : 125
+  cpu avg/max  : 8.27% / 10.00%
+  rx avg/max   : 393.981 / 423.921 Mbps
+  tx avg/max   : 393.721 / 415.166 Mbps
+
+michael9@10.10.1.9:22
+  samples      : 125
+  cpu avg/max  : 8.70% / 10.70%
+  rx avg/max   : 393.998 / 425.756 Mbps
+  tx avg/max   : 393.850 / 491.338 Mbps
+
