@@ -50,7 +50,10 @@ impl Helper {
         if !self.committee.attack_enabled || !self.committee.attack_limit_certificates {
             return false;
         }
-        let elapsed = self.boot_instant.elapsed();
+        let elapsed = match crate::benchmark_clock::elapsed(self.boot_instant.elapsed()) {
+            Some(elapsed) => elapsed,
+            None => return false,
+        };
         let start = Duration::from_secs(self.committee.attack_start_secs);
         if elapsed < start {
             return false;

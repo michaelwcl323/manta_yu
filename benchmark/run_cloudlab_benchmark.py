@@ -90,6 +90,8 @@ def process_logs(faults=0, save_to_file=True):
                 'execution_time_end_unix': end_u,
                 'execution_time_duration_s': dur_u,
             }
+            if parser.benchmark_start_unix is not None:
+                meta_update['benchmark_start_unix'] = parser.benchmark_start_unix
             origin = parser.execution_origin_unix()
             if origin is not None:
                 meta_update['execution_origin_unix'] = origin

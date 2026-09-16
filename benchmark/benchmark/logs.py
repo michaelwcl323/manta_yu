@@ -55,6 +55,9 @@ class LogParser:
         assert all(isinstance(x, str) for y in inputs for x in y)
         assert all(x for x in inputs)
 
+        starts = [float(t) / 1000 for log in clients
+                  for t in findall(r"Benchmark start unix ms: (\d+)", log)]
+        self.benchmark_start_unix = min(starts) if starts else None
         self.faults = faults
         if isinstance(faults, int):
             self.committee_size = len(primaries) + int(faults)
@@ -238,7 +241,7 @@ class LogParser:
         return mean(latency) if latency else 0
 
     def execution_origin_unix(self):
-        """Wall-clock max primary ``successfully booted`` time (subset of execution T0 logic)."""
+        """Wall-clock max primary boot time, retained for attack-window alignment."""
         boots = [t for t in self.primary_boot_times if t is not None]
         if not boots:
             return None
@@ -247,6 +250,7 @@ class LogParser:
     def execution_time_window(self):
         """``(start_unix, end_unix, duration_s)`` — same window as Summary *Execution time* / E2E TPS.
 
+        Use the synchronized release timestamp, or the earliest client start for legacy logs.
         ``start_unix`` is the single source of truth for ``relative_time_s`` in ``latency.csv`` and
         for latency plot axes (``execution_time_start_unix`` in ``run_metadata.json``).
         """
@@ -261,7 +265,13 @@ class LogParser:
             if d in self.proposals
         ]
         chain_start = min(proposal_times) if proposal_times else None
-        if primary_start is not None:
+        client_starts = [t for t in self.start if t is not None]
+        if getattr(self, "benchmark_start_unix", None) is not None:
+            start = self.benchmark_start_unix
+        elif client_starts:
+            # Start when the first client begins sending, excluding node startup.
+            start = min(client_starts)
+        elif primary_start is not None:
             start = primary_start
         elif chain_start is not None:
             start = chain_start

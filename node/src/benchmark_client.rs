@@ -98,6 +98,23 @@ impl Client {
             .await
             .context(format!("failed to connect to {}", self.target))?;
 
+        // The controller releases all connected clients with one shared wall-clock T0.
+        if let Ok(path) = std::env::var("MANTA_BENCHMARK_START_FILE") {
+            info!("Client ready; waiting for benchmark start");
+            let start = loop {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    if let Ok(value) = text.trim().parse::<u64>() {
+                        break std::time::UNIX_EPOCH + Duration::from_millis(value);
+                    }
+                }
+                sleep(Duration::from_millis(20)).await;
+            };
+            info!("Benchmark start unix ms: {}", start.duration_since(std::time::UNIX_EPOCH)?.as_millis());
+            while let Ok(remaining) = start.duration_since(std::time::SystemTime::now()) {
+                sleep(remaining.min(Duration::from_millis(100))).await;
+            }
+        }
+
         // Submit all transactions.
         let burst = self.rate / PRECISION;
         let mut tx = BytesMut::with_capacity(self.size);

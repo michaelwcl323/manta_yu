@@ -71,12 +71,16 @@ def get_attack_window(
         }
 
     start_secs = float(attack_start_secs)
-    use_axis = execution_time_axis_t0(metadata) is not None
+    t0 = execution_time_axis_t0(metadata)
+    use_axis = t0 is not None
+    primary_origin = metadata.get("benchmark_start_unix", metadata.get("execution_origin_unix"))
+    attack_start = start_secs
+    if use_axis and primary_origin is not None:
+        attack_start += float(primary_origin) - t0
     return {
         "offset_s": start_secs,
-        # Same wall clock as Summary Execution time T0: attack at x = attack_start_secs when T0
-        # is last primary boot (matches node ``attack_start_secs`` after boot).
-        "start": start_secs if use_axis else 0.0,
+        # New runs share the release clock; legacy attacks were timed from primary boot.
+        "start": attack_start if use_axis else 0.0,
         "duration": float(attack_duration_secs or 0.0),
         "use_execution_time_axis": use_axis,
     }

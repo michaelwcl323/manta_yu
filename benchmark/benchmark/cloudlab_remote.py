@@ -1352,6 +1352,8 @@ fi
 # Use relative path since we're already in the repo directory
 exec > {log_file} 2>&1
 
+# Share the controller's release file with primary and client processes.
+{('export MANTA_BENCHMARK_START_FILE="$PWD/' + self._benchmark_start_file + '"') if getattr(self, '_benchmark_start_file', None) else ''}
 # Execute the command
 # Use exec to replace shell with the actual process
 exec {resolved_command}
@@ -1479,10 +1481,56 @@ SCRIPTEOF'''
         
         return None
     
+    def _release_benchmark(self, jobs):
+        import time
+        import io
+
+        def connect(host):
+            return Connection(host['hostname'], user=host.get('username', 'root'),
+                              port=host.get('port', 22),
+                              connect_kwargs=self._get_connection_kwargs(host), connect_timeout=30)
+
+        def ready(job):
+            host, logfile, marker = job
+            with connect(host) as conn:
+                deadline = time.monotonic() + 60
+                path = shlex.quote(f'{self.settings.repo_name}/{logfile}')
+                while time.monotonic() < deadline:
+                    if conn.run(f'grep -Fq {shlex.quote(marker)} {path}', hide=True, warn=True).ok:
+                        return
+                    time.sleep(0.2)
+            raise RuntimeError(f'Process not ready on {host["hostname"]}: {logfile}')
+
+        try:
+            with ThreadPoolExecutor(max_workers=32) as pool:
+                list(pool.map(ready, jobs))
+            start_ms = int((time.time() + 15) * 1000)
+            hosts = {job[0]['hostname']: job[0] for job in jobs}
+
+            def release(host):
+                with connect(host) as conn:
+                    path = f'{self.settings.repo_name}/{self._benchmark_start_file}'
+                    conn.put(io.BytesIO(str(start_ms).encode()), remote=path + '.tmp')
+                    conn.run(f'mv {shlex.quote(path + ".tmp")} {shlex.quote(path)}', hide=True)
+
+            with ThreadPoolExecutor(max_workers=32) as pool:
+                list(pool.map(release, hosts.values()))
+            if time.time() >= start_ms / 1000:
+                raise RuntimeError('Missed synchronized start deadline')
+            PathMaker.update_run_metadata({'benchmark_start_unix': start_ms / 1000})
+            Print.info(f'All processes ready; synchronized start at Unix {start_ms / 1000:.3f}')
+            time.sleep(max(0, start_ms / 1000 - time.time()))
+        except Exception as error:
+            self.kill(hosts=list({job[0]['hostname']: job[0] for job in jobs}.values()))
+            raise BenchError('Failed to synchronize benchmark start', error)
+
     def _run_single(self, rate, committee, bench_parameters, node_parameters, selected_hosts, debug=False):
-        """Run one CloudLab iteration: clients, then workers, then primaries (primary last)."""
+        """Run one CloudLab iteration: primaries, then workers, then clients."""
         from time import sleep
 
+        import uuid
+        self._benchmark_start_file = ".benchmark-start-" + uuid.uuid4().hex
+        readiness_jobs = []
         faults = bench_parameters.faults
 
         # 1. Kill any potentially unfinished run and delete logs (same intent as Bench._run_single)
@@ -1495,7 +1543,56 @@ SCRIPTEOF'''
         # Pre-compute workers' addresses (filtered for faults) – same as Bench._run_single
         workers_addresses = committee.workers_addresses(faults)
 
-        # 2. Clients first (they block until the node is reachable / ready to accept load).
+        # 2. Start all primaries in parallel before workers and clients.
+        Print.info(f'Booting {len(committee.primary_addresses(faults))} primaries in parallel...')
+        primary_jobs: list[tuple] = []
+        for i, address in enumerate(committee.primary_addresses(faults)):
+            host_info = self._get_host_by_address(address, selected_hosts)
+            if not host_info:
+                raise BenchError('Missing benchmark host', ValueError(address))
+
+            cmd = CommandMaker.run_primary(
+                PathMaker.key_file(i),
+                PathMaker.committee_file(),
+                PathMaker.db_path(i),
+                PathMaker.parameters_file(),
+                debug=debug
+            )
+            log_file = PathMaker.primary_log_file(i)
+            primary_jobs.append((host_info, cmd, log_file))
+            readiness_jobs.append((host_info, log_file, "successfully booted on"))
+
+        if primary_jobs:
+            max_parallel = min(32, len(primary_jobs))
+            with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+                futures = [
+                    pool.submit(self._background_run, h, c, lf)
+                    for h, c, lf in primary_jobs
+                ]
+                for fut in as_completed(futures):
+                    fut.result()
+
+        # 3. Start workers after primaries so batch notifications have a receiver.
+        Print.info('Booting workers...')
+        for i, addresses in enumerate(workers_addresses):
+            for (id, address) in addresses:
+                host_info = self._get_host_by_address(address, selected_hosts)
+                if not host_info:
+                    raise BenchError('Missing benchmark host', ValueError(address))
+
+                cmd = CommandMaker.run_worker(
+                    PathMaker.key_file(i),
+                    PathMaker.committee_file(),
+                    PathMaker.db_path(i, id),
+                    PathMaker.parameters_file(),
+                    id,  # The worker's id.
+                    debug=debug
+                )
+                log_file = PathMaker.worker_log_file(i, id)
+                self._background_run(host_info, cmd, log_file)
+                readiness_jobs.append((host_info, log_file, "successfully booted on"))
+
+        # 4. Start clients only after primaries and workers have started.
         Print.info('Booting clients...')
         workers_total = committee.workers()
         if bench_parameters.rate_type == 'balanced':
@@ -1524,8 +1621,7 @@ SCRIPTEOF'''
             for (id, address) in addresses:
                 host_info = self._get_host_by_address(address, selected_hosts)
                 if not host_info:
-                    Print.warn(f'Could not find host for address {address}')
-                    continue
+                    raise BenchError('Missing benchmark host', ValueError(address))
 
                 client_rate = worker_rates[min(worker_index, len(worker_rates) - 1)]
                 cmd = CommandMaker.run_client(
@@ -1536,57 +1632,11 @@ SCRIPTEOF'''
                 )
                 log_file = PathMaker.client_log_file(i, id)
                 self._background_run(host_info, cmd, log_file)
+                readiness_jobs.append((host_info, log_file, "Client ready; waiting for benchmark start"))
                 worker_index += 1
 
-        # 3. Workers before primaries so workers are listening when the primary starts.
-        Print.info('Booting workers...')
-        for i, addresses in enumerate(workers_addresses):
-            for (id, address) in addresses:
-                host_info = self._get_host_by_address(address, selected_hosts)
-                if not host_info:
-                    Print.warn(f'Could not find host for address {address}')
-                    continue
-
-                cmd = CommandMaker.run_worker(
-                    PathMaker.key_file(i),
-                    PathMaker.committee_file(),
-                    PathMaker.db_path(i, id),
-                    PathMaker.parameters_file(),
-                    id,  # The worker's id.
-                    debug=debug
-                )
-                log_file = PathMaker.worker_log_file(i, id)
-                self._background_run(host_info, cmd, log_file)
-
-        # 4. Primaries last (CloudLab): start all primaries in parallel so boot_instant / log
-        #    wall times are as aligned as SSH allows (sequential starts skew attack windows).
-        Print.info(f'Booting {len(committee.primary_addresses(faults))} primaries in parallel...')
-        primary_jobs: list[tuple] = []
-        for i, address in enumerate(committee.primary_addresses(faults)):
-            host_info = self._get_host_by_address(address, selected_hosts)
-            if not host_info:
-                Print.warn(f'Could not find host for address {address}')
-                continue
-
-            cmd = CommandMaker.run_primary(
-                PathMaker.key_file(i),
-                PathMaker.committee_file(),
-                PathMaker.db_path(i),
-                PathMaker.parameters_file(),
-                debug=debug
-            )
-            log_file = PathMaker.primary_log_file(i)
-            primary_jobs.append((host_info, cmd, log_file))
-
-        if primary_jobs:
-            max_parallel = min(32, len(primary_jobs))
-            with ThreadPoolExecutor(max_workers=max_parallel) as pool:
-                futures = [
-                    pool.submit(self._background_run, h, c, lf)
-                    for h, c, lf in primary_jobs
-                ]
-                for fut in as_completed(futures):
-                    fut.result()
+        # Release clients only after every process has reported readiness.
+        self._release_benchmark(readiness_jobs)
 
         # 5. Wait for all transactions to be processed (progress output)
         duration = bench_parameters.duration

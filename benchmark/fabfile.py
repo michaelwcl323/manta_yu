@@ -295,8 +295,8 @@ def cloudlab_remote(
     solid_candidate_threshold=0,
 
     attack_enabled=True,
-    attack_start_secs=80,
-    attack_duration_secs=10,
+    attack_start_secs=60,
+    attack_duration_secs=1000,
     attack_group_size=5,
     attack_limit_headers=False,
     attack_limit_certificates=True,
@@ -311,7 +311,7 @@ def cloudlab_remote(
     network_tag='geo',
     load_tag='kappa=2_reference=7',
 ):
-    '''Run benchmarks on CloudLab (boot order: client → worker → primary last).'''
+    '''Run benchmarks on CloudLab (boot order: primary → worker → client).'''
     allow_cross_step_weak_edges = _coerce_bool(allow_cross_step_weak_edges)
     enable_fast_coin = _coerce_bool(enable_fast_coin)
     solid_commit_trigger_on_solid_step = _coerce_bool(solid_commit_trigger_on_solid_step)
@@ -326,7 +326,7 @@ def cloudlab_remote(
         'workers': 1,
         'collocate': True,
         'rate_type': 'balanced',
-        'rate': [80000],
+        'rate': [100000],
         # 'rate': [40000,60000],
         # 'rate': [40000,80000,100000,120000,140000,150000,160000,180000],
         # 'rate': [130000],
