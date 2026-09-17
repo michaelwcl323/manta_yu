@@ -174,12 +174,9 @@ impl HeaderWaiter {
                                 });
                             }
                             for (worker_id, digests) in requires_sync {
-                                // Ask our own worker to fetch the batch from the
-                                // header author's worker. The response must come
-                                // back through our worker to notify this primary.
                                 let address = self.committee
-                                    .worker(&self.name, &worker_id)
-                                    .expect("Our worker is not in the committee")
+                                    .worker(&author, &worker_id)
+                                    .expect("Author of valid header is not in the committee")
                                     .primary_to_worker;
                                 debug!(
                                     "Sending batch sync request for header {} (round {}): requesting {} batch(es) from worker {} at {}",
