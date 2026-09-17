@@ -1410,8 +1410,7 @@ SCRIPTEOF'''
             
             Print.info(f'  ✓ {name} started on {hostname} (PID: {pid})')
             
-            # Wait a bit and verify the process is actually running
-            sleep(1.0)
+            # Check the process without adding a fixed delay between launches.
             check_cmd = f'ps -p {pid} >/dev/null 2>&1 && echo "Running" || echo "Not running"'
             check_result = c.run(check_cmd, hide=True, warn=True)
             
@@ -1496,17 +1495,10 @@ SCRIPTEOF'''
         return None
 
     def _boot_group(self, label, commands):
-        """Boot one process type in parallel, then wait before starting the next type."""
-        from concurrent.futures import ThreadPoolExecutor
-
+        """Boot one process type sequentially before starting the next type."""
         Print.info(f'Booting {label}...')
-        if not commands:
-            return
-        with ThreadPoolExecutor(max_workers=min(32, len(commands))) as pool:
-            futures = [pool.submit(self._background_run, host, cmd, log)
-                       for host, cmd, log in commands]
-            for future in futures:
-                future.result()
+        for host, cmd, log in commands:
+            self._background_run(host, cmd, log)
     
     def _run_single(self, rate, committee, bench_parameters, node_parameters, selected_hosts, debug=False):
         """Run a single benchmark iteration (CloudLab), mirroring logic from Bench._run_single"""
@@ -1517,13 +1509,12 @@ SCRIPTEOF'''
         Print.info('Killing any existing processes and ports...')
         self.kill(hosts=selected_hosts, delete_logs=True, committee=committee, faults=faults)
 
-        # Small delay to ensure processes are killed and database cleanup completes
-        sleep(3)
-
         # Pre-compute workers' addresses (filtered for faults) – same as Bench._run_single
         workers_addresses = committee.workers_addresses(faults)
 
-        # 2. Start clients first; each waits for all worker addresses to be reachable.
+        # 2. Start clients first. They wait for every worker and primary receiver
+        # before sending transactions, so workers do not drop digest notices while
+        # primaries are still starting.
         client_commands = []
         workers_total = committee.workers()
         if bench_parameters.rate_type == 'balanced':
@@ -1548,6 +1539,9 @@ SCRIPTEOF'''
             )
 
         worker_index = 0
+        ready_addresses = [x for y in workers_addresses for _, x in y]
+        for authority in list(committee.json['authorities'].values())[:committee.size() - faults]:
+            ready_addresses.extend(authority['primary'].values())
         for i, addresses in enumerate(workers_addresses):
             for (id, address) in addresses:
                 host_info = self._get_host_by_address(address, selected_hosts)
@@ -1560,7 +1554,7 @@ SCRIPTEOF'''
                     address,
                     bench_parameters.tx_size,
                     client_rate,
-                    [x for y in workers_addresses for _, x in y]
+                    ready_addresses
                 )
                 log_file = PathMaker.client_log_file(i, id)
                 client_commands.append((host_info, cmd, log_file))
@@ -1568,7 +1562,26 @@ SCRIPTEOF'''
 
         self._boot_group('clients', client_commands)
 
-        # 3. Start workers in parallel after every client has been launched.
+        # 3. Start primaries one by one after every client has been launched.
+        primary_commands = []
+        for i, address in enumerate(committee.primary_addresses(faults)):
+            host_info = self._get_host_by_address(address, selected_hosts)
+            if not host_info:
+                Print.warn(f'Could not find host for address {address}')
+                continue
+
+            cmd = CommandMaker.run_primary(
+                PathMaker.key_file(i),
+                PathMaker.committee_file(),
+                PathMaker.db_path(i),
+                PathMaker.parameters_file(),
+                debug=debug
+            )
+            log_file = PathMaker.primary_log_file(i)
+            primary_commands.append((host_info, cmd, log_file))
+        self._boot_group('primaries', primary_commands)
+
+        # 4. Start workers one by one after every primary has been launched.
         worker_commands = []
         for i, addresses in enumerate(workers_addresses):
             for (id, address) in addresses:
@@ -1588,25 +1601,6 @@ SCRIPTEOF'''
                 log_file = PathMaker.worker_log_file(i, id)
                 worker_commands.append((host_info, cmd, log_file))
         self._boot_group('workers', worker_commands)
-
-        # 4. Start primaries in parallel after every worker has been launched.
-        primary_commands = []
-        for i, address in enumerate(committee.primary_addresses(faults)):
-            host_info = self._get_host_by_address(address, selected_hosts)
-            if not host_info:
-                Print.warn(f'Could not find host for address {address}')
-                continue
-
-            cmd = CommandMaker.run_primary(
-                PathMaker.key_file(i),
-                PathMaker.committee_file(),
-                PathMaker.db_path(i),
-                PathMaker.parameters_file(),
-                debug=debug
-            )
-            log_file = PathMaker.primary_log_file(i)
-            primary_commands.append((host_info, cmd, log_file))
-        self._boot_group('primaries', primary_commands)
 
         # 5. Wait for all transactions to be processed (progress output)
         duration = bench_parameters.duration

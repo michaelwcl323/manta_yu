@@ -230,7 +230,7 @@ Examples:
                        help='Limit cross-group header broadcasts during the attack window')
     parser.add_argument('--no-attack-limit-headers', dest='attack_limit_headers', action='store_false',
                        help='Do not limit header broadcasts during the attack window')
-    parser.set_defaults(attack_limit_headers=False)
+    parser.set_defaults(attack_limit_headers=True)
     parser.add_argument('--attack-limit-certificates', dest='attack_limit_certificates', action='store_true',
                        help='Limit cross-group certificate broadcasts and sync replies during the attack window')
     parser.add_argument('--no-attack-limit-certificates', dest='attack_limit_certificates', action='store_false',
@@ -323,4 +323,3 @@ Examples:
 
 if __name__ == '__main__':
     sys.exit(main())
-
