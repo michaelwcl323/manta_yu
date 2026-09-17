@@ -49,6 +49,9 @@ impl Helper {
         });
     }
 
+    // Selective-attack sync filter (disabled): filtering pull replies partitions the DAG when
+    // cross-group visibility is 0. Eager certificate broadcast stays limited in core.
+    #[allow(dead_code)]
     fn attack_active(&self) -> bool {
         if !self.committee.attack_enabled || !self.committee.attack_limit_certificates {
             return false;
@@ -68,6 +71,7 @@ impl Helper {
         elapsed < start + Duration::from_secs(duration_secs)
     }
 
+    #[allow(dead_code)]
     fn should_reply_to_requestor(&self, requestor: &PublicKey) -> bool {
         !self.attack_active()
             || self
@@ -88,9 +92,10 @@ impl Helper {
                 }
             };
 
-            if !self.should_reply_to_requestor(&origin) {
-                continue;
-            }
+            // Disabled: do not filter certificate sync replies under selective attack.
+            // if !self.should_reply_to_requestor(&origin) {
+            //     continue;
+            // }
 
             // Reply to the request (the best we can).
             for digest in digests {
