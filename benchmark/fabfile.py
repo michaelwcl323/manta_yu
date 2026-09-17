@@ -264,7 +264,7 @@ def cloudlab_wan(ctx, action='setup', settings_file='cloudlab_settings.json'):
 @task
 def cloudlab_remote(
     ctx,
-    debug=False,
+    debug=True,
     sigma=1,
     kappa=2,
     reference=4,
@@ -294,11 +294,11 @@ def cloudlab_remote(
     fast_coin_candidate_threshold=0,
     solid_candidate_threshold=0,
 
-    attack_enabled=True,
+    attack_enabled=False,
     attack_start_secs=60,
     attack_duration_secs=1000,
     attack_group_size=5,
-    attack_limit_headers=False,
+    attack_limit_headers=True,
     attack_limit_certificates=True,
 
     # 这是payload 的调度，第三轮和第二轮的顶点接收payload，目前以第三轮顶点优先，多余的给第二轮
@@ -326,7 +326,7 @@ def cloudlab_remote(
         'workers': 1,
         'collocate': True,
         'rate_type': 'balanced',
-        'rate': [80000],
+        'rate': [100000],
         # 'rate': [40000,60000],
         # 'rate': [40000,80000,100000,120000,140000,150000,160000,180000],
         # 'rate': [130000],

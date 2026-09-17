@@ -7,7 +7,7 @@ use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt as _;
 use log::{debug, error};
 use network::SimpleSender;
-use primary::PrimaryWorkerMessage;
+use primary::{PrimaryWorkerMessage, WorkerPrimaryMessage};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use store::{Store, StoreError};
@@ -128,7 +128,17 @@ impl Synchronizer {
                                     debug!("Requesting sync for batch {}", digest);
                                 },
                                 Ok(Some(_)) => {
-                                    // The batch arrived in the meantime: no need to request it.
+                                    // The batch is local, but its earlier digest notice may
+                                    // have been lost while the primary was starting. Resend it.
+                                    let primary_address = self.committee
+                                        .primary(&self.name)
+                                        .expect("Our public key is not in the committee")
+                                        .worker_to_primary;
+                                    let notice = WorkerPrimaryMessage::OthersBatch(digest, self.id);
+                                    let bytes = bincode::serialize(&notice)
+                                        .expect("Failed to serialize batch digest notice");
+                                    self.network.send(primary_address, Bytes::from(bytes)).await;
+                                    continue;
                                 },
                                 Err(e) => {
                                     error!("{}", e);
@@ -142,6 +152,10 @@ impl Synchronizer {
                             let fut = Self::waiter(digest.clone(), self.store.clone(), deliver, rx_cancel);
                             waiting.push(fut);
                             self.pending.insert(digest, (self.round, tx_cancel, now));
+                        }
+
+                        if missing.is_empty() {
+                            continue;
                         }
 
                         // Send sync request to a single node. If this fails, we will send it

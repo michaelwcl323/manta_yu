@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use super::*;
-use crate::common::{batch_digest, committee_with_base_port, keys, listener};
+use crate::common::{batch_digest, committee_with_base_port, keys, listener, serialized_batch};
 use std::fs;
 use tokio::sync::mpsc::channel;
 
@@ -44,4 +44,40 @@ async fn synchronize() {
 
     // Ensure the target receives the sync request.
     assert!(handle.await.is_ok());
+}
+
+#[tokio::test]
+async fn synchronize_existing_batch_renotifies_primary() {
+    let (tx_message, rx_message) = channel(1);
+    let (name, _) = keys().pop().unwrap();
+    let id = 0;
+    let committee = committee_with_base_port(10_000);
+    let path = ".db_test_synchronize_existing";
+    let _ = fs::remove_dir_all(path);
+    let mut store = Store::new(path).unwrap();
+    let digest = batch_digest();
+    store.write(digest.to_vec(), serialized_batch()).await;
+
+    Synchronizer::spawn(
+        name,
+        id,
+        committee.clone(),
+        store,
+        50,
+        1_000,
+        3,
+        rx_message,
+    );
+
+    let primary_address = committee.primary(&name).unwrap().worker_to_primary;
+    let expected = bincode::serialize(&WorkerPrimaryMessage::OthersBatch(digest.clone(), id)).unwrap();
+    let handle = listener(primary_address, Some(Bytes::from(expected)));
+    tx_message
+        .send(PrimaryWorkerMessage::Synchronize(vec![digest], name))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), handle)
+        .await
+        .expect("Primary did not receive the stored batch digest")
+        .unwrap();
 }
