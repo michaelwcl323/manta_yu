@@ -166,6 +166,11 @@ class PathMaker:
         return join(run_dir, 'run_metadata.json') if run_dir else None
 
     @staticmethod
+    def run_logs_path(run_dir=None):
+        run_dir = run_dir or PathMaker.current_run_path()
+        return join(run_dir, 'logs') if run_dir else None
+
+    @staticmethod
     def output_path():
         return PathMaker.current_run_path() or PathMaker.base_results_path()
 
@@ -285,10 +290,30 @@ class PathMaker:
 
     @staticmethod
     def export_run_artifacts():
+        artifacts = {}
+        run_dir = PathMaker.current_run_path()
+        if not run_dir:
+            return artifacts
+
+        source_logs_dir = PathMaker.logs_path()
+        target_logs_dir = PathMaker.run_logs_path(run_dir)
+        if os.path.isdir(source_logs_dir) and target_logs_dir:
+            if os.path.isdir(target_logs_dir):
+                shutil.rmtree(target_logs_dir)
+            shutil.copytree(source_logs_dir, target_logs_dir)
+            artifacts['logs_dir'] = target_logs_dir
+
+            primary0_log = join(target_logs_dir, 'primary-0.log')
+            if os.path.exists(primary0_log):
+                artifacts['primary0_log'] = primary0_log
+
+        if artifacts:
+            PathMaker.update_run_metadata({'artifacts': artifacts}, run_dir=run_dir)
+
         # DAG-related exports are useful for debugging, but they re-scan large
         # primary logs and noticeably slow down benchmark post-processing.
         # Keep them disabled by default during parameter sweeps.
-        return {}
+        return artifacts
 
     @staticmethod
     def export_final_dag(log_files=None, output_file=None):

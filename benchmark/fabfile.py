@@ -295,8 +295,8 @@ def cloudlab_remote(
     solid_candidate_threshold=0,
 
     attack_enabled=True,
-    attack_start_secs=80,
-    attack_duration_secs=5,
+    attack_start_secs=60,
+    attack_duration_secs=1000,
     attack_group_size=5,
     attack_limit_headers=False,
     attack_limit_certificates=True,
