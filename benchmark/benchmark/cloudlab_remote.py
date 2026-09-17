@@ -14,6 +14,7 @@ from paramiko.ssh_exception import PasswordRequiredException, SSHException
 from time import sleep
 from math import ceil
 from copy import deepcopy
+import json
 import subprocess
 import re
 import shlex
@@ -92,8 +93,57 @@ class CloudLabBench:
             if output.stderr:
                 raise ExecutionError(output.stderr)
 
+    def _sibling_run_dirs_with_latency(self, run_path):
+        """Direct sibling run dirs under the same load_tag folder that have latency.csv."""
+        parent = run_path.parent
+        if not parent.is_dir():
+            return []
+        return sorted(
+            path.parent
+            for path in parent.glob('*/latency.csv')
+            if path.is_file()
+        )
+
+    def _run_overlay_fingerprint(self, run_path):
+        """Comparable config key so overlay only mixes like-with-like runs."""
+        meta_path = run_path / 'run_metadata.json'
+        if not meta_path.exists():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+        node = meta.get('node_params') or {}
+        bench = meta.get('bench_params') or {}
+        return (
+            node.get('kappa'),
+            node.get('coverage'),
+            node.get('reference'),
+            bench.get('rate'),
+            node.get('attack_start_secs'),
+            node.get('attack_group_size'),
+        )
+
+    def _sibling_run_dirs_for_overlay(self, run_path, max_runs=8):
+        """
+        Sibling runs to overlay: same load_tag folder, matching config fingerprint,
+        most recent by directory name (timestamp prefix), capped at max_runs.
+        """
+        siblings = self._sibling_run_dirs_with_latency(run_path)
+        cur = self._run_overlay_fingerprint(run_path)
+        if cur is not None:
+            matched = []
+            for path in siblings:
+                fp = self._run_overlay_fingerprint(path)
+                if fp == cur or (fp is None and path == run_path):
+                    matched.append(path)
+            siblings = matched
+        # Newest first via YYYYMMDD_HHMMSS_... directory prefix, then chronological for plot.
+        newest = sorted(siblings, key=lambda p: p.name, reverse=True)[:max_runs]
+        return sorted(newest, key=lambda p: p.name)
+
     def _auto_plot_run_latency(self, run_dir):
-        """Generate latency plots for a single run directory (from 24fb25f)."""
+        """Generate per-run latency plots and refresh the load_tag overlay."""
         base_dir = Path(__file__).resolve().parent.parent
         run_path = Path(run_dir)
         if not run_path.is_absolute():
@@ -104,16 +154,52 @@ class CloudLabBench:
             Print.warn(f'Auto-plot skipped: latency.csv not found in {run_path}')
             return
 
+        plot_script = base_dir / 'plot_attack_latency_timeseries.py'
         plots = [
             (
                 base_dir / 'plot_primary_start_consensus_avg_per_run.py',
                 ['--input-dir', str(run_path), '--time-axis', 'commit'],
             ),
             (
-                base_dir / 'plot_attack_latency_timeseries.py',
+                plot_script,
                 ['--input-dir', str(run_path), '--time-axis', 'commit'],
             ),
         ]
+
+        # Overlay recent sibling runs under design/network/load_tag.
+        siblings = self._sibling_run_dirs_for_overlay(run_path)
+        if plot_script.exists() and len(siblings) >= 2:
+            overlay_out = run_path.parent / 'attack_latency_timeseries_overlay.png'
+            overlay_args = [
+                '--merge-runs', *[str(p) for p in siblings],
+                '--time-axis', 'commit',
+                '--output', str(overlay_out),
+            ]
+            meta_path = run_path / 'run_metadata.json'
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                    node_params = meta.get('node_params') or {}
+                    if node_params.get('attack_start_secs') is not None:
+                        overlay_args.extend([
+                            '--attack-start-secs', str(int(node_params['attack_start_secs'])),
+                        ])
+                    duration = node_params.get('attack_duration_secs')
+                    bench_duration = (meta.get('bench_params') or {}).get('duration')
+                    if duration is not None and bench_duration is not None:
+                        shade = min(int(duration), int(bench_duration))
+                        if shade > 0:
+                            overlay_args.extend(['--attack-duration-secs', str(shade)])
+                    elif duration is not None:
+                        overlay_args.extend(['--attack-duration-secs', str(int(duration))])
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    pass
+            plots.append((plot_script, overlay_args))
+        elif len(siblings) < 2:
+            Print.info(
+                'Auto-plot overlay skipped: need >=2 matching sibling runs with latency.csv '
+                f'under {run_path.parent}'
+            )
 
         for script_path, extra_args in plots:
             if not script_path.exists():
