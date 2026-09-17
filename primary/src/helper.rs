@@ -12,6 +12,8 @@ use tokio::sync::mpsc::Receiver;
 /// A task dedicated to help other authorities by replying to their certificates requests.
 pub struct Helper {
     /// The public key of this primary.
+    /// Kept for the (currently disabled) selective-attack sync filter below.
+    #[allow(dead_code)]
     name: PublicKey,
     /// The committee information.
     committee: Committee,
@@ -21,7 +23,8 @@ pub struct Helper {
     rx_primaries: Receiver<(Vec<Digest>, PublicKey)>,
     /// A network sender to reply to the sync requests.
     network: SimpleSender,
-    /// Node-local attack clock.
+    /// Node-local attack clock (used by the disabled sync filter helpers).
+    #[allow(dead_code)]
     boot_instant: Instant,
 }
 

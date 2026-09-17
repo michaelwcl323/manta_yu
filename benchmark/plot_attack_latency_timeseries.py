@@ -749,7 +749,7 @@ def draw(
 
         if title and title.strip():
             ax.set_title(title)
-        ax.set_xlabel("Time (s)")
+        ax.set_xlabel("Time since synchronized start (s)")
         ax.set_ylabel(rolling_latency_ylabel(rolling_stat))
         if y_log_scale:
             apply_log_scale_latency_below_cut(
@@ -904,7 +904,7 @@ def parse_args() -> argparse.Namespace:
         "--x-min-s",
         type=float,
         default=0.0,
-        help="X-axis minimum (seconds since primary start). Default 0.",
+        help="X-axis minimum (seconds since synchronized start). Default 0.",
     )
     parser.add_argument(
         "--x-max-s",

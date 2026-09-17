@@ -91,6 +91,57 @@ class CloudLabBench:
         else:
             if output.stderr:
                 raise ExecutionError(output.stderr)
+
+    def _auto_plot_run_latency(self, run_dir):
+        """Generate latency plots for a single run directory (from 24fb25f)."""
+        base_dir = Path(__file__).resolve().parent.parent
+        run_path = Path(run_dir)
+        if not run_path.is_absolute():
+            run_path = base_dir / run_path
+
+        latency_csv = run_path / 'latency.csv'
+        if not latency_csv.exists():
+            Print.warn(f'Auto-plot skipped: latency.csv not found in {run_path}')
+            return
+
+        plots = [
+            (
+                base_dir / 'plot_primary_start_consensus_avg_per_run.py',
+                ['--input-dir', str(run_path), '--time-axis', 'commit'],
+            ),
+            (
+                base_dir / 'plot_attack_latency_timeseries.py',
+                ['--input-dir', str(run_path), '--time-axis', 'commit'],
+            ),
+        ]
+
+        for script_path, extra_args in plots:
+            if not script_path.exists():
+                Print.warn(f'Auto-plot skipped: script not found at {script_path}')
+                continue
+
+            try:
+                result = subprocess.run(
+                    ['python3', str(script_path), *extra_args],
+                    cwd=str(base_dir),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception as e:
+                Print.warn(f'Auto-plot failed for {run_path}: {e}')
+                continue
+
+            if result.returncode != 0:
+                err = (result.stderr or result.stdout or '').strip()
+                Print.warn(f'Auto-plot failed for {run_path}: {err}')
+                continue
+
+            output_text = (result.stdout or '').strip()
+            if output_text:
+                Print.info('Auto-plot generated:')
+                for line in output_text.splitlines():
+                    Print.info(f'  {line}')
     
     def _get_connection_kwargs(self, host_info):
         """Get connection kwargs for a specific host (without port/timeout, passed separately)"""
@@ -177,10 +228,17 @@ class CloudLabBench:
         return results
     
     def install(self):
-        """Install Rust and clone the repo on all CloudLab nodes"""
+        """Install Rust and clone a fresh copy of the repo on all CloudLab nodes.
+
+        Always removes ``~/<repo_name>`` first so each ``fab cloudlab-install``
+        starts from a clean tree (no stale branches/binaries).
+        """
         Print.info('Installing rust and cloning the repo...')
         
         host_info = self.manager.get_host_info()
+        repo = self.settings.repo_name
+        url = self.settings.repo_url
+        branch = self.settings.branch
         cmd = [
             'sudo apt-get update',
             'sudo apt-get install -y tmux',
@@ -200,8 +258,11 @@ class CloudLabBench:
             # Add cargo to PATH permanently
             'echo "export PATH=\\$HOME/.cargo/bin:\\$PATH" >> $HOME/.bashrc',
             'echo "export PATH=\\$HOME/.cargo/bin:\\$PATH" >> $HOME/.profile',
-            f'(git clone {self.settings.repo_url} || (cd {self.settings.repo_name} ; git pull))',
-            f'cd {self.settings.repo_name}/benchmark && pip3 install -r requirements.txt'
+            # Always wipe the previous checkout before cloning.
+            f'rm -rf "$HOME/{repo}"',
+            f'GIT_TERMINAL_PROMPT=0 git clone -b {branch} {url} "$HOME/{repo}"',
+            f'cd "$HOME/{repo}" && git log -1 --oneline',
+            f'cd "$HOME/{repo}/benchmark" && pip3 install -r requirements.txt',
         ]
         
         try:
@@ -1293,6 +1354,8 @@ fi
 # Use relative path since we're already in the repo directory
 exec > {log_file} 2>&1
 
+# Share the controller's release file with primary/client (attack + plot T0).
+{('export MANTA_BENCHMARK_START_FILE="$PWD/' + self._benchmark_start_file + '"') if getattr(self, '_benchmark_start_file', None) else ''}
 # Execute the command
 # Use exec to replace shell with the actual process
 exec {resolved_command}
@@ -1419,11 +1482,56 @@ SCRIPTEOF'''
             return selected_hosts[0]
         
         return None
+
+    def _release_benchmark(self, selected_hosts):
+        """Write synchronized T0 on every host right before the duration wait."""
+        import io
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        if not getattr(self, '_benchmark_start_file', None):
+            return
+
+        start_ms = int((time.time() + 3) * 1000)
+        path = f'{self.settings.repo_name}/{self._benchmark_start_file}'
+
+        def release(host):
+            conn = Connection(
+                host['hostname'],
+                user=host.get('username', 'root'),
+                port=host.get('port', 22),
+                connect_kwargs=self._get_connection_kwargs(host),
+                connect_timeout=30,
+            )
+            try:
+                conn.put(io.BytesIO(str(start_ms).encode()), remote=path + '.tmp')
+                conn.run(
+                    f'mv {shlex.quote(path + ".tmp")} {shlex.quote(path)}',
+                    hide=True,
+                )
+            finally:
+                conn.close()
+
+        try:
+            with ThreadPoolExecutor(max_workers=min(32, max(1, len(selected_hosts)))) as pool:
+                list(pool.map(release, selected_hosts))
+            if time.time() >= start_ms / 1000:
+                raise RuntimeError('Missed synchronized start deadline')
+            PathMaker.update_run_metadata({'benchmark_start_unix': start_ms / 1000.0})
+            Print.info(
+                f'All processes booted; synchronized start at Unix {start_ms / 1000:.3f}'
+            )
+            time.sleep(max(0.0, start_ms / 1000 - time.time()))
+        except Exception as error:
+            self.kill(hosts=selected_hosts)
+            raise BenchError('Failed to synchronize benchmark start', error)
     
     def _run_single(self, rate, committee, bench_parameters, node_parameters, selected_hosts, debug=False):
         """Run a single benchmark iteration (CloudLab), mirroring logic from Bench._run_single"""
         from time import sleep
+        import uuid
 
+        self._benchmark_start_file = '.benchmark-start-' + uuid.uuid4().hex
         faults = bench_parameters.faults
 
         # 1. Kill any potentially unfinished run and delete logs (same intent as Bench._run_single)
@@ -1517,6 +1625,9 @@ SCRIPTEOF'''
                 )
                 log_file = PathMaker.worker_log_file(i, id)
                 self._background_run(host_info, cmd, log_file)
+
+        # Release synchronized T0 after every process has been launched.
+        self._release_benchmark(selected_hosts)
 
         # 5. Wait for all transactions to be processed (progress output)
         duration = bench_parameters.duration
@@ -1691,6 +1802,7 @@ SCRIPTEOF'''
                                 max_workers=bench_parameters.workers,
                             )
                             PathMaker.export_run_artifacts()
+                            self._auto_plot_run_latency(run_dir)
                         except (subprocess.SubprocessError, GroupException, ParseError) as e:
                             self.kill(hosts=selected_hosts)
                             if isinstance(e, GroupException):

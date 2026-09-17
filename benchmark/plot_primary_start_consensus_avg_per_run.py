@@ -277,7 +277,7 @@ def plot_run(
             )
 
     ax.set_title(title)
-    ax.set_xlabel("Time since primary start (s)")
+    ax.set_xlabel("Time since synchronized start (s)")
     ax.set_ylabel(
         latency_yaxis_label(
             "Consensus latency (s)",
@@ -333,14 +333,16 @@ def main() -> None:
             skipped += 1
             continue
 
-        primary_start_ts = min(sample["proposal_ts"] for sample in samples)
+        primary_start_ts = resolve_primary_start_ts(
+            run_dir, min(sample["proposal_ts"] for sample in samples)
+        )
         attack_start_s, attack_duration_s = load_attack_window(run_dir, primary_start_ts)
         output_file = run_dir / args.output_name
         y_lim = None if args.no_shared_y_axis else shared_lim
         plot_run(
             series,
             output_file,
-            title=f"Consensus latency vs primary uptime ({args.time_axis})\n{run_dir.name}",
+            title=f"Consensus latency vs synchronized start ({args.time_axis})\n{run_dir.name}",
             attack_start_s=attack_start_s,
             attack_duration_s=attack_duration_s,
             y_log_scale=args.y_log_scale,
