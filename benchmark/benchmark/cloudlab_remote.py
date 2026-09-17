@@ -15,9 +15,11 @@ from time import sleep
 from math import ceil
 from copy import deepcopy
 import json
+import os
 import subprocess
 import re
 import shlex
+import sys
 
 from benchmark.config import Committee, Key, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker
@@ -93,57 +95,8 @@ class CloudLabBench:
             if output.stderr:
                 raise ExecutionError(output.stderr)
 
-    def _sibling_run_dirs_with_latency(self, run_path):
-        """Direct sibling run dirs under the same load_tag folder that have latency.csv."""
-        parent = run_path.parent
-        if not parent.is_dir():
-            return []
-        return sorted(
-            path.parent
-            for path in parent.glob('*/latency.csv')
-            if path.is_file()
-        )
-
-    def _run_overlay_fingerprint(self, run_path):
-        """Comparable config key so overlay only mixes like-with-like runs."""
-        meta_path = run_path / 'run_metadata.json'
-        if not meta_path.exists():
-            return None
-        try:
-            meta = json.loads(meta_path.read_text())
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return None
-        node = meta.get('node_params') or {}
-        bench = meta.get('bench_params') or {}
-        return (
-            node.get('kappa'),
-            node.get('coverage'),
-            node.get('reference'),
-            bench.get('rate'),
-            node.get('attack_start_secs'),
-            node.get('attack_group_size'),
-        )
-
-    def _sibling_run_dirs_for_overlay(self, run_path, max_runs=8):
-        """
-        Sibling runs to overlay: same load_tag folder, matching config fingerprint,
-        most recent by directory name (timestamp prefix), capped at max_runs.
-        """
-        siblings = self._sibling_run_dirs_with_latency(run_path)
-        cur = self._run_overlay_fingerprint(run_path)
-        if cur is not None:
-            matched = []
-            for path in siblings:
-                fp = self._run_overlay_fingerprint(path)
-                if fp == cur or (fp is None and path == run_path):
-                    matched.append(path)
-            siblings = matched
-        # Newest first via YYYYMMDD_HHMMSS_... directory prefix, then chronological for plot.
-        newest = sorted(siblings, key=lambda p: p.name, reverse=True)[:max_runs]
-        return sorted(newest, key=lambda p: p.name)
-
     def _auto_plot_run_latency(self, run_dir):
-        """Generate per-run latency plots and refresh the load_tag overlay."""
+        """Generate per-run latency plots (p95 + overlay_mean) for this run only."""
         base_dir = Path(__file__).resolve().parent.parent
         run_path = Path(run_dir)
         if not run_path.is_absolute():
@@ -154,52 +107,27 @@ class CloudLabBench:
             Print.warn(f'Auto-plot skipped: latency.csv not found in {run_path}')
             return
 
-        plot_script = base_dir / 'plot_attack_latency_timeseries.py'
+        overlay_mean_out = run_path / 'attack_latency_timeseries_overlay_mean.png'
         plots = [
             (
                 base_dir / 'plot_primary_start_consensus_avg_per_run.py',
                 ['--input-dir', str(run_path), '--time-axis', 'commit'],
             ),
             (
-                plot_script,
+                base_dir / 'plot_attack_latency_timeseries.py',
                 ['--input-dir', str(run_path), '--time-axis', 'commit'],
             ),
+            (
+                base_dir / 'plot_attack_latency_timeseries.py',
+                [
+                    '--input-dir', str(run_path),
+                    '--time-axis', 'commit',
+                    '--rolling-stat', 'mean',
+                    '--y-range-auto',
+                    '--output', str(overlay_mean_out),
+                ],
+            ),
         ]
-
-        # Overlay recent sibling runs under design/network/load_tag.
-        siblings = self._sibling_run_dirs_for_overlay(run_path)
-        if plot_script.exists() and len(siblings) >= 2:
-            overlay_out = run_path.parent / 'attack_latency_timeseries_overlay.png'
-            overlay_args = [
-                '--merge-runs', *[str(p) for p in siblings],
-                '--time-axis', 'commit',
-                '--output', str(overlay_out),
-            ]
-            meta_path = run_path / 'run_metadata.json'
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text())
-                    node_params = meta.get('node_params') or {}
-                    if node_params.get('attack_start_secs') is not None:
-                        overlay_args.extend([
-                            '--attack-start-secs', str(int(node_params['attack_start_secs'])),
-                        ])
-                    duration = node_params.get('attack_duration_secs')
-                    bench_duration = (meta.get('bench_params') or {}).get('duration')
-                    if duration is not None and bench_duration is not None:
-                        shade = min(int(duration), int(bench_duration))
-                        if shade > 0:
-                            overlay_args.extend(['--attack-duration-secs', str(shade)])
-                    elif duration is not None:
-                        overlay_args.extend(['--attack-duration-secs', str(int(duration))])
-                except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                    pass
-            plots.append((plot_script, overlay_args))
-        elif len(siblings) < 2:
-            Print.info(
-                'Auto-plot overlay skipped: need >=2 matching sibling runs with latency.csv '
-                f'under {run_path.parent}'
-            )
 
         for script_path, extra_args in plots:
             if not script_path.exists():
@@ -1440,8 +1368,6 @@ fi
 # Use relative path since we're already in the repo directory
 exec > {log_file} 2>&1
 
-# Share the controller's release file with primary/client (attack + plot T0).
-{('export MANTA_BENCHMARK_START_FILE="$PWD/' + self._benchmark_start_file + '"') if getattr(self, '_benchmark_start_file', None) else ''}
 # Execute the command
 # Use exec to replace shell with the actual process
 exec {resolved_command}
@@ -1569,55 +1495,22 @@ SCRIPTEOF'''
         
         return None
 
-    def _release_benchmark(self, selected_hosts):
-        """Write synchronized T0 on every host right before the duration wait."""
-        import io
-        import time
+    def _boot_group(self, label, commands):
+        """Boot one process type in parallel, then wait before starting the next type."""
         from concurrent.futures import ThreadPoolExecutor
 
-        if not getattr(self, '_benchmark_start_file', None):
+        Print.info(f'Booting {label}...')
+        if not commands:
             return
-
-        start_ms = int((time.time() + 3) * 1000)
-        path = f'{self.settings.repo_name}/{self._benchmark_start_file}'
-
-        def release(host):
-            conn = Connection(
-                host['hostname'],
-                user=host.get('username', 'root'),
-                port=host.get('port', 22),
-                connect_kwargs=self._get_connection_kwargs(host),
-                connect_timeout=30,
-            )
-            try:
-                conn.put(io.BytesIO(str(start_ms).encode()), remote=path + '.tmp')
-                conn.run(
-                    f'mv {shlex.quote(path + ".tmp")} {shlex.quote(path)}',
-                    hide=True,
-                )
-            finally:
-                conn.close()
-
-        try:
-            with ThreadPoolExecutor(max_workers=min(32, max(1, len(selected_hosts)))) as pool:
-                list(pool.map(release, selected_hosts))
-            if time.time() >= start_ms / 1000:
-                raise RuntimeError('Missed synchronized start deadline')
-            PathMaker.update_run_metadata({'benchmark_start_unix': start_ms / 1000.0})
-            Print.info(
-                f'All processes booted; synchronized start at Unix {start_ms / 1000:.3f}'
-            )
-            time.sleep(max(0.0, start_ms / 1000 - time.time()))
-        except Exception as error:
-            self.kill(hosts=selected_hosts)
-            raise BenchError('Failed to synchronize benchmark start', error)
+        with ThreadPoolExecutor(max_workers=min(32, len(commands))) as pool:
+            futures = [pool.submit(self._background_run, host, cmd, log)
+                       for host, cmd, log in commands]
+            for future in futures:
+                future.result()
     
     def _run_single(self, rate, committee, bench_parameters, node_parameters, selected_hosts, debug=False):
         """Run a single benchmark iteration (CloudLab), mirroring logic from Bench._run_single"""
         from time import sleep
-        import uuid
-
-        self._benchmark_start_file = '.benchmark-start-' + uuid.uuid4().hex
         faults = bench_parameters.faults
 
         # 1. Kill any potentially unfinished run and delete logs (same intent as Bench._run_single)
@@ -1630,9 +1523,8 @@ SCRIPTEOF'''
         # Pre-compute workers' addresses (filtered for faults) – same as Bench._run_single
         workers_addresses = committee.workers_addresses(faults)
 
-        # 2. Run the clients first (they will wait for the nodes to be ready)
-        #    This mirrors benchmark/benchmark/remote.py::_run_single
-        Print.info('Booting clients...')
+        # 2. Start clients first; each waits for all worker addresses to be reachable.
+        client_commands = []
         workers_total = committee.workers()
         if bench_parameters.rate_type == 'balanced':
             rate_share = ceil(rate / workers_total)
@@ -1671,29 +1563,13 @@ SCRIPTEOF'''
                     [x for y in workers_addresses for _, x in y]
                 )
                 log_file = PathMaker.client_log_file(i, id)
-                self._background_run(host_info, cmd, log_file)
+                client_commands.append((host_info, cmd, log_file))
                 worker_index += 1
 
-        # 3. Run the primaries (except the faulty ones) – same order as Bench._run_single
-        Print.info('Booting primaries...')
-        for i, address in enumerate(committee.primary_addresses(faults)):
-            host_info = self._get_host_by_address(address, selected_hosts)
-            if not host_info:
-                Print.warn(f'Could not find host for address {address}')
-                continue
+        self._boot_group('clients', client_commands)
 
-            cmd = CommandMaker.run_primary(
-                PathMaker.key_file(i),
-                PathMaker.committee_file(),
-                PathMaker.db_path(i),
-                PathMaker.parameters_file(),
-                debug=debug
-            )
-            log_file = PathMaker.primary_log_file(i)
-            self._background_run(host_info, cmd, log_file)
-
-        # 4. Run the workers (except the faulty ones) – same as Bench._run_single
-        Print.info('Booting workers...')
+        # 3. Start workers in parallel after every client has been launched.
+        worker_commands = []
         for i, addresses in enumerate(workers_addresses):
             for (id, address) in addresses:
                 host_info = self._get_host_by_address(address, selected_hosts)
@@ -1710,10 +1586,27 @@ SCRIPTEOF'''
                     debug=debug
                 )
                 log_file = PathMaker.worker_log_file(i, id)
-                self._background_run(host_info, cmd, log_file)
+                worker_commands.append((host_info, cmd, log_file))
+        self._boot_group('workers', worker_commands)
 
-        # Release synchronized T0 after every process has been launched.
-        self._release_benchmark(selected_hosts)
+        # 4. Start primaries in parallel after every worker has been launched.
+        primary_commands = []
+        for i, address in enumerate(committee.primary_addresses(faults)):
+            host_info = self._get_host_by_address(address, selected_hosts)
+            if not host_info:
+                Print.warn(f'Could not find host for address {address}')
+                continue
+
+            cmd = CommandMaker.run_primary(
+                PathMaker.key_file(i),
+                PathMaker.committee_file(),
+                PathMaker.db_path(i),
+                PathMaker.parameters_file(),
+                debug=debug
+            )
+            log_file = PathMaker.primary_log_file(i)
+            primary_commands.append((host_info, cmd, log_file))
+        self._boot_group('primaries', primary_commands)
 
         # 5. Wait for all transactions to be processed (progress output)
         duration = bench_parameters.duration
@@ -1897,4 +1790,9 @@ SCRIPTEOF'''
                             continue
         
         Print.heading('All benchmarks completed')
-
+        # Fabric ThreadingGroup / paramiko can race OpenSSL atexit handlers and
+        # crash with "double free or corruption" after a successful run. Skip
+        # interpreter teardown once work is done.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)

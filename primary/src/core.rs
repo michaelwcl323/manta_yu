@@ -111,10 +111,7 @@ impl Core {
         if !self.committee.attack_enabled {
             return false;
         }
-        let elapsed = match crate::benchmark_clock::elapsed(self.boot_instant.elapsed()) {
-            Some(elapsed) => elapsed,
-            None => return false,
-        };
+        let elapsed = self.boot_instant.elapsed();
         let start = Duration::from_secs(self.committee.attack_start_secs);
         if elapsed < start {
             return false;
@@ -132,17 +129,9 @@ impl Core {
         }
 
         tokio::spawn(async move {
-            let attack_start = Duration::from_secs(committee.attack_start_secs);
-            loop {
-                match crate::benchmark_clock::elapsed(boot_instant.elapsed()) {
-                    None => tokio::time::sleep(Duration::from_millis(50)).await,
-                    Some(elapsed) if elapsed < attack_start => {
-                        let remaining = attack_start.saturating_sub(elapsed);
-                        tokio::time::sleep(remaining.min(Duration::from_millis(200))).await;
-                    }
-                    Some(_) => break,
-                }
-            }
+            let attack_start =
+                tokio::time::Instant::from_std(boot_instant + Duration::from_secs(committee.attack_start_secs));
+            tokio::time::sleep_until(attack_start).await;
             info!(
                 "start attack: headers_limited={} certificates_limited={} \
                  start_secs={} duration_secs={} group_size={} kappa={} reference={} coverage={}",
@@ -158,14 +147,9 @@ impl Core {
 
             if committee.attack_duration_secs > 0 {
                 let attack_end = attack_start + Duration::from_secs(committee.attack_duration_secs);
-                loop {
-                    match crate::benchmark_clock::elapsed(boot_instant.elapsed()) {
-                        Some(elapsed) if elapsed >= attack_end => break,
-                        _ => tokio::time::sleep(Duration::from_millis(100)).await,
-                    }
-                }
+                tokio::time::sleep_until(attack_end).await;
                 info!(
-                    "end attack: elapsed_since_start_secs={} duration_secs={}",
+                    "end attack: elapsed_since_boot_secs={} duration_secs={}",
                     committee.attack_start_secs + committee.attack_duration_secs,
                     committee.attack_duration_secs,
                 );

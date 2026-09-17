@@ -40,8 +40,8 @@ def resolve_primary_start_ts(run_dir: Path, fallback_min_proposal_ts: float) -> 
     """
     Unix timestamp for plot t=0.
 
-    Prefer ``run_metadata.benchmark_start_unix`` (synchronized release right before
-    duration). Fall back to client Start, then primary-0 boot, then min proposal.
+    Prefer the recorded release time for older synchronized runs. New runs use
+    client Start, then primary-0 boot, then min proposal.
     """
     metadata_path = run_dir / "run_metadata.json"
     if metadata_path.exists():
