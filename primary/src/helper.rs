@@ -12,8 +12,6 @@ use tokio::sync::mpsc::Receiver;
 /// A task dedicated to help other authorities by replying to their certificates requests.
 pub struct Helper {
     /// The public key of this primary.
-    /// Kept for the (currently disabled) selective-attack sync filter below.
-    #[allow(dead_code)]
     name: PublicKey,
     /// The committee information.
     committee: Committee,
@@ -23,8 +21,7 @@ pub struct Helper {
     rx_primaries: Receiver<(Vec<Digest>, PublicKey)>,
     /// A network sender to reply to the sync requests.
     network: SimpleSender,
-    /// Node-local attack clock (used by the disabled sync filter helpers).
-    #[allow(dead_code)]
+    /// Node-local attack clock.
     boot_instant: Instant,
 }
 
@@ -49,9 +46,6 @@ impl Helper {
         });
     }
 
-    // Selective-attack sync filter (disabled): filtering pull replies partitions the DAG when
-    // cross-group visibility is 0. Eager certificate broadcast stays limited in core.
-    #[allow(dead_code)]
     fn attack_active(&self) -> bool {
         if !self.committee.attack_enabled || !self.committee.attack_limit_certificates {
             return false;
@@ -68,7 +62,6 @@ impl Helper {
         elapsed < start + Duration::from_secs(duration_secs)
     }
 
-    #[allow(dead_code)]
     fn should_reply_to_requestor(&self, requestor: &PublicKey) -> bool {
         !self.attack_active()
             || self
@@ -89,10 +82,9 @@ impl Helper {
                 }
             };
 
-            // Disabled: do not filter certificate sync replies under selective attack.
-            // if !self.should_reply_to_requestor(&origin) {
-            //     continue;
-            // }
+            if !self.should_reply_to_requestor(&origin) {
+                continue;
+            }
 
             // Reply to the request (the best we can).
             for digest in digests {
