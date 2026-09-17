@@ -27,7 +27,7 @@ def parse_client_start_ts(run_dir: Path) -> float | None:
                 for line in f:
                     if "Start sending" not in line:
                         continue
-                    match = search(r"\[(.*Z) ", line)
+                    match = search(r"\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z) ", line)
                     if match is not None:
                         starts.append(_to_posix_utc(match.group(1)))
                     break
