@@ -236,6 +236,8 @@ Examples:
     parser.add_argument('--no-attack-limit-certificates', dest='attack_limit_certificates', action='store_false',
                        help='Do not limit certificate broadcasts during the attack window')
     parser.set_defaults(attack_limit_certificates=True)
+    parser.add_argument('--attack-regroup-interval-ms', type=int, default=200,
+                        help='Attack group rotation interval in milliseconds; 0 disables regrouping')
     parser.add_argument('--attack-cross-group-delay-ms', type=int, default=500,
                         help='Extra cross-group message delay during attack (milliseconds)')
     
@@ -285,6 +287,7 @@ Examples:
                 'attack_start_secs': args.attack_start_secs,
                 'attack_duration_secs': args.attack_duration_secs,
                 'attack_group_size': args.attack_group_size,
+                'attack_regroup_interval_ms': args.attack_regroup_interval_ms,
                 'attack_limit_headers': args.attack_limit_headers,
                 'attack_limit_certificates': args.attack_limit_certificates,
                 'attack_cross_group_delay_ms': args.attack_cross_group_delay_ms,

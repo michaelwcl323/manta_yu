@@ -284,6 +284,7 @@ class LogParser:
             ('Attack start seconds', 'attack_start_secs'),
             ('Attack duration seconds', 'attack_duration_secs'),
             ('Attack group size', 'attack_group_size'),
+            ('Attack regroup interval ms', 'attack_regroup_interval_ms'),
             ('Attack limit headers', 'attack_limit_headers'),
             ('Attack limit certificates', 'attack_limit_certificates'),
             ('Attack cross-group delay ms', 'attack_cross_group_delay_ms'),

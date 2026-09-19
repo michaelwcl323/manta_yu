@@ -134,17 +134,50 @@ impl Core {
             tokio::time::sleep_until(attack_start).await;
             info!(
                 "start attack: headers_limited={} certificates_limited={} \
-                 start_secs={} duration_secs={} group_size={} cross_group_delay_ms={} kappa={} reference={} coverage={}",
+                 start_secs={} duration_secs={} group_size={} cross_group_delay_ms={} regroup_interval_ms={} regroup_shift={} kappa={} reference={} coverage={}",
                 committee.attack_limit_headers,
                 committee.attack_limit_certificates,
                 committee.attack_start_secs,
                 committee.attack_duration_secs,
                 committee.attack_group_size,
                 committee.attack_cross_group_delay_ms,
+                committee.attack_regroup_interval_ms,
+                committee.attack_regroup_shift(),
                 committee.kappa,
                 committee.reference,
                 committee.coverage,
             );
+
+            if committee.attack_regroup_interval_ms > 0 {
+                let mut epoch = 1u64;
+                loop {
+                    let offset_ms = epoch.saturating_mul(committee.attack_regroup_interval_ms);
+                    if committee.attack_duration_secs > 0
+                        && offset_ms >= committee.attack_duration_secs.saturating_mul(1000)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep_until(attack_start + Duration::from_millis(offset_ms)).await;
+                    let mut groups = [Vec::new(), Vec::new()];
+                    for name in committee.authorities.keys() {
+                        if let (Some(group), Some(index)) = (
+                            committee.attack_group_at_epoch(name, epoch),
+                            committee.authority_index(name),
+                        ) {
+                            groups[group].push(index);
+                        }
+                    }
+                    groups[0].sort_unstable();
+                    groups[1].sort_unstable();
+                    info!("regroup attack: epoch={} elapsed_since_boot_ms={} group0={:?} group1={:?} cross_group_delay_ms={}",
+                        epoch,
+                        committee.attack_start_secs.saturating_mul(1000) + offset_ms,
+                        groups[0],
+                        groups[1],
+                        committee.attack_cross_group_delay_ms);
+                    epoch += 1;
+                }
+            }
 
             if committee.attack_duration_secs > 0 {
                 let attack_end = attack_start + Duration::from_secs(committee.attack_duration_secs);
@@ -164,12 +197,17 @@ impl Core {
         } else {
             self.attack_active_for_certificates()
         };
+        let epoch = self.committee.attack_group_epoch(self.boot_instant.elapsed());
         self.committee
             .others_primaries(&self.name)
             .into_iter()
             .map(|(recipient, addresses)| {
                 let delay = if active {
-                    self.committee.attack_link_delay_ms(&self.name, &recipient)
+                    self.committee.attack_link_delay_at_epoch_ms(
+                        &self.name,
+                        &recipient,
+                        epoch,
+                    )
                 } else {
                     0
                 };

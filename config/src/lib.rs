@@ -278,6 +278,9 @@ pub struct Committee {
     /// Size of the first attack group. When set to 0, split the committee in half.
     #[serde(default = "default_attack_group_size")]
     pub attack_group_size: usize,
+    /// Regroup interval after attack start, in milliseconds. Zero keeps static groups.
+    #[serde(default)]
+    pub attack_regroup_interval_ms: u64,
     /// Whether to delay cross-group header broadcasts during the attack.
     #[serde(default = "default_attack_limit_headers")]
     pub attack_limit_headers: bool,
@@ -353,6 +356,83 @@ impl Committee {
     /// Delay for a cross-group transport link. The caller applies the attack window and message switch.
     pub fn attack_link_delay_ms(&self, sender: &PublicKey, recipient: &PublicKey) -> u64 {
         match (self.selective_attack_group(sender), self.selective_attack_group(recipient)) {
+            (Some(a), Some(b)) if a != b => self.attack_cross_group_delay_ms,
+            _ => 0,
+        }
+    }
+
+    pub fn attack_group_epoch(&self, elapsed: std::time::Duration) -> u64 {
+        if self.attack_regroup_interval_ms == 0 {
+            return 0;
+        }
+        let elapsed_ms = elapsed.as_millis() as u64;
+        let start_ms = self.attack_start_secs.saturating_mul(1000);
+        elapsed_ms.saturating_sub(start_ms) / self.attack_regroup_interval_ms
+    }
+
+    fn gcd(mut a: usize, mut b: usize) -> usize {
+        while b != 0 {
+            let rest = a % b;
+            a = b;
+            b = rest;
+        }
+        a
+    }
+
+    /// Window shift between consecutive regroup epochs.
+    /// For a balanced split this maximizes how many edges flip between intra-group
+    /// and cross-group; ties keep the shift that visits more distinct partitions.
+    /// On 10 nodes with group size 5 the shift is 3, so consecutive groups share
+    /// only 2 members instead of rotating by one.
+    pub fn attack_regroup_shift(&self) -> usize {
+        let n = self.size();
+        let split = self.selective_attack_group_size();
+        if n <= 1 {
+            return 1;
+        }
+        let mut best_d = 1;
+        let mut best_score = 0usize;
+        let mut best_distinct = 0usize;
+        for d in 1..n {
+            let mut inter = 0usize;
+            for i in 0..split {
+                if (i + n - (d % n)) % n < split {
+                    inter += 1;
+                }
+            }
+            let score = inter.saturating_mul(split.saturating_sub(inter));
+            let distinct = n / Self::gcd(d, n).max(1);
+            if score > best_score || (score == best_score && distinct > best_distinct) {
+                best_score = score;
+                best_distinct = distinct;
+                best_d = d;
+            }
+        }
+        best_d
+    }
+
+    pub fn attack_group_at_epoch(&self, name: &PublicKey, epoch: u64) -> Option<usize> {
+        let index = self.authority_index(name)?;
+        let size = self.size();
+        if size == 0 {
+            return None;
+        }
+        let shift = self.attack_regroup_shift();
+        let offset = ((epoch % size as u64) as usize).saturating_mul(shift) % size;
+        let shifted = (index + offset) % size;
+        Some(usize::from(shifted >= self.selective_attack_group_size()))
+    }
+
+    pub fn attack_link_delay_at_epoch_ms(
+        &self,
+        sender: &PublicKey,
+        recipient: &PublicKey,
+        epoch: u64,
+    ) -> u64 {
+        match (
+            self.attack_group_at_epoch(sender, epoch),
+            self.attack_group_at_epoch(recipient, epoch),
+        ) {
             (Some(a), Some(b)) if a != b => self.attack_cross_group_delay_ms,
             _ => 0,
         }
@@ -723,6 +803,7 @@ mod tests {
             attack_start_secs: 0,
             attack_duration_secs: 0,
             attack_group_size: 0,
+            attack_regroup_interval_ms: 0,
             attack_limit_headers: false,
             attack_limit_certificates: true,
         }
@@ -920,6 +1001,63 @@ mod tests {
             &recipient
         ));
     }
+
+    #[test]
+    fn attack_regroups_every_200ms_and_maximizes_consecutive_cut_change() {
+        let mut committee = attack_committee(10, 7);
+        committee.attack_start_secs = 60;
+        committee.attack_regroup_interval_ms = 200;
+        committee.attack_cross_group_delay_ms = 200;
+        committee.attack_group_size = 5;
+        let names: Vec<_> = committee.authorities.keys().copied().collect();
+        assert_eq!(committee.attack_regroup_shift(), 3);
+        for (millis, epoch) in [
+            (59_000, 0),
+            (60_000, 0),
+            (60_199, 0),
+            (60_200, 1),
+            (60_400, 2),
+        ] {
+            assert_eq!(
+                committee.attack_group_epoch(std::time::Duration::from_millis(millis)),
+                epoch
+            );
+        }
+        for epoch in 0..20 {
+            let group0: Vec<_> = names
+                .iter()
+                .enumerate()
+                .filter(|(_, name)| committee.attack_group_at_epoch(name, epoch) == Some(0))
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(group0.len(), 5);
+            let next: Vec<_> = names
+                .iter()
+                .enumerate()
+                .filter(|(_, name)| committee.attack_group_at_epoch(name, epoch + 1) == Some(0))
+                .map(|(index, _)| index)
+                .collect();
+            let inter = group0.iter().filter(|index| next.contains(index)).count();
+            assert_eq!(inter, 2, "epoch {epoch} consecutive groups should share 2 nodes");
+            let mut flipped = 0usize;
+            for (i, sender) in names.iter().enumerate() {
+                for recipient in names.iter().skip(i + 1) {
+                    if committee.attack_link_delay_at_epoch_ms(sender, recipient, epoch)
+                        != committee.attack_link_delay_at_epoch_ms(sender, recipient, epoch + 1)
+                    {
+                        flipped += 1;
+                    }
+                }
+            }
+            assert_eq!(flipped, 24, "epoch {epoch} should flip the maximum 24 undirected edges");
+        }
+        committee.attack_regroup_interval_ms = 0;
+        assert_eq!(
+            committee.attack_group_epoch(std::time::Duration::from_secs(100)),
+            0
+        );
+    }
+
     #[test]
     fn cross_group_delay_is_independent_of_coverage() {
         for coverage in [4, 7, 10] {

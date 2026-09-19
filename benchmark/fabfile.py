@@ -298,9 +298,10 @@ def cloudlab_remote(
     attack_start_secs=60,
     attack_duration_secs=60,
     attack_group_size=5,
+    attack_regroup_interval_ms=200,
     attack_limit_headers=False,
     attack_limit_certificates=True,
-    attack_cross_group_delay_ms=500,
+    attack_cross_group_delay_ms=200,
 
     # 这是payload 的调度，第三轮和第二轮的顶点接收payload，目前以第三轮顶点优先，多余的给第二轮
     enable_adaptive_intermediate_spill=False, # payload shceduling
@@ -308,7 +309,7 @@ def cloudlab_remote(
     adaptive_intermediate_spill_cap_digests=1,
 
     #会根据这些tag会自动生成目录，将运行结果分类 目录是 design_tag/network_tag/load_tag/
-    design_tag='experiment2_test',
+    design_tag='experiment2_debug0919',
     network_tag='geo',
     load_tag='balanced_50_50',
 ):
@@ -363,6 +364,7 @@ def cloudlab_remote(
         'attack_start_secs': int(attack_start_secs),
         'attack_duration_secs': int(attack_duration_secs),
         'attack_group_size': int(attack_group_size),
+        'attack_regroup_interval_ms': int(attack_regroup_interval_ms),
         'attack_limit_headers': attack_limit_headers,
         'attack_limit_certificates': attack_limit_certificates,
         'attack_cross_group_delay_ms': int(attack_cross_group_delay_ms),

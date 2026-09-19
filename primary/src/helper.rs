@@ -76,7 +76,11 @@ impl Helper {
             };
 
             let delay_ms = if self.attack_active() {
-                self.committee.attack_link_delay_ms(&self.name, &origin)
+                self.committee.attack_link_delay_at_epoch_ms(
+                    &self.name,
+                    &origin,
+                    self.committee.attack_group_epoch(self.boot_instant.elapsed()),
+                )
             } else {
                 0
             };

@@ -69,6 +69,7 @@ pub fn committee() -> Committee {
         attack_start_secs: 0,
         attack_duration_secs: 0,
         attack_group_size: 0,
+        attack_regroup_interval_ms: 0,
         attack_limit_headers: false,
         attack_limit_certificates: true,
     }

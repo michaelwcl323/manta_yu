@@ -1033,6 +1033,7 @@ class CloudLabBench:
             attack_group_size,
             attack_limit_headers,
             attack_limit_certificates,
+            attack_regroup_interval_ms=node_parameters.json.get('attack_regroup_interval_ms', 0),
             attack_cross_group_delay_ms=node_parameters.json.get(
                 'attack_cross_group_delay_ms', 500),
         )
@@ -1667,6 +1668,7 @@ SCRIPTEOF'''
                                             'attack_start_secs',
                                             'attack_duration_secs',
                                             'attack_group_size',
+                                            'attack_regroup_interval_ms',
                                             'attack_limit_headers',
                                             'attack_limit_certificates',
                                             'attack_cross_group_delay_ms',
