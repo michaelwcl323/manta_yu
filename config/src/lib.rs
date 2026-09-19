@@ -8,6 +8,7 @@ use std::fs::{self, OpenOptions};
 use std::io::BufWriter;
 use std::io::Write as _;
 use std::net::SocketAddr;
+use std::time::Duration;
 use thiserror::Error;
 
 fn default_allow_cross_step_weak_edges() -> bool {
@@ -52,6 +53,14 @@ fn default_attack_limit_headers() -> bool {
 
 fn default_attack_limit_certificates() -> bool {
     true
+}
+
+fn default_attack_open_every_secs() -> u64 {
+    0
+}
+
+fn default_attack_open_for_secs() -> u64 {
+    0
 }
 
 fn default_enable_adaptive_intermediate_spill() -> bool {
@@ -277,11 +286,55 @@ pub struct Committee {
     /// Whether to limit certificate broadcasts and sync replies once the attack starts.
     #[serde(default = "default_attack_limit_certificates")]
     pub attack_limit_certificates: bool,
+    /// Within the attack window, periodically lift the selective filter: every
+    /// `attack_open_every_secs`, keep filtering off for `attack_open_for_secs` at the
+    /// end of each period. Zero disables pulsing (continuous filter while the window is active).
+    #[serde(default = "default_attack_open_every_secs")]
+    pub attack_open_every_secs: u64,
+    /// How long each periodic open lasts. Ignored when `attack_open_every_secs` is 0.
+    #[serde(default = "default_attack_open_for_secs")]
+    pub attack_open_for_secs: u64,
 }
 
 impl Import for Committee {}
 
 impl Committee {
+    /// True when `elapsed_since_boot` falls inside the configured attack start/duration window.
+    pub fn attack_window_active(&self, elapsed_since_boot: Duration) -> bool {
+        if !self.attack_enabled {
+            return false;
+        }
+        let start = Duration::from_secs(self.attack_start_secs);
+        if elapsed_since_boot < start {
+            return false;
+        }
+        let duration_secs = self.attack_duration_secs;
+        if duration_secs == 0 {
+            return true;
+        }
+        elapsed_since_boot < start + Duration::from_secs(duration_secs)
+    }
+
+    /// True when the selective filter should currently drop non-neighborhood traffic.
+    /// Inside the attack window this is usually true, except during each periodic open pulse.
+    pub fn attack_filter_engaged(&self, elapsed_since_boot: Duration) -> bool {
+        if !self.attack_window_active(elapsed_since_boot) {
+            return false;
+        }
+        let every = self.attack_open_every_secs;
+        let open_for = self.attack_open_for_secs;
+        if every == 0 || open_for == 0 {
+            return true;
+        }
+        let open_for = open_for.min(every);
+        let since_start = elapsed_since_boot
+            .as_secs()
+            .saturating_sub(self.attack_start_secs);
+        let phase = since_start % every;
+        // Filter for the first (every - open_for) seconds of each period, then open.
+        phase < every - open_for
+    }
+
     /// Returns the number of authorities.
     pub fn size(&self) -> usize {
         self.authorities.len()
@@ -687,6 +740,7 @@ mod tests {
     use super::{Authority, Committee, PrimaryAddresses};
     use crate::generate_production_keypair;
     use std::collections::{BTreeMap, HashMap};
+    use std::time::Duration;
 
     fn overlapping_committee() -> Committee {
         Committee {
@@ -707,6 +761,8 @@ mod tests {
             attack_group_size: 0,
             attack_limit_headers: false,
             attack_limit_certificates: true,
+            attack_open_every_secs: 0,
+            attack_open_for_secs: 0,
         }
     }
 
@@ -901,5 +957,28 @@ mod tests {
             &authorities[5],
             &recipient
         ));
+    }
+
+    #[test]
+    fn attack_filter_pulses_open_at_end_of_each_period() {
+        let mut committee = overlapping_committee();
+        committee.attack_enabled = true;
+        committee.attack_start_secs = 10;
+        committee.attack_duration_secs = 60;
+        committee.attack_open_every_secs = 10;
+        committee.attack_open_for_secs = 2;
+
+        // Before window.
+        assert!(!committee.attack_filter_engaged(Duration::from_secs(9)));
+        // First period: filter 0..8, open 8..10 relative to attack start.
+        assert!(committee.attack_filter_engaged(Duration::from_secs(10)));
+        assert!(committee.attack_filter_engaged(Duration::from_secs(17)));
+        assert!(!committee.attack_filter_engaged(Duration::from_secs(18)));
+        assert!(!committee.attack_filter_engaged(Duration::from_secs(19)));
+        // Second period starts at +10s.
+        assert!(committee.attack_filter_engaged(Duration::from_secs(20)));
+        assert!(!committee.attack_filter_engaged(Duration::from_secs(29)));
+        // After window ends at boot+70.
+        assert!(!committee.attack_filter_engaged(Duration::from_secs(70)));
     }
 }

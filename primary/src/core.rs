@@ -108,19 +108,7 @@ impl Core {
     }
 
     fn attack_active_now(&self) -> bool {
-        if !self.committee.attack_enabled {
-            return false;
-        }
-        let elapsed = self.boot_instant.elapsed();
-        let start = Duration::from_secs(self.committee.attack_start_secs);
-        if elapsed < start {
-            return false;
-        }
-        let duration_secs = self.committee.attack_duration_secs;
-        if duration_secs == 0 {
-            return true;
-        }
-        elapsed < start + Duration::from_secs(duration_secs)
+        self.committee.attack_filter_engaged(self.boot_instant.elapsed())
     }
 
     fn spawn_attack_log_task(committee: Committee, boot_instant: Instant) {
@@ -134,7 +122,8 @@ impl Core {
             tokio::time::sleep_until(attack_start).await;
             info!(
                 "start attack: headers_limited={} certificates_limited={} \
-                 start_secs={} duration_secs={} group_size={} kappa={} reference={} coverage={}",
+                 start_secs={} duration_secs={} group_size={} kappa={} reference={} coverage={} \
+                 open_every_secs={} open_for_secs={}",
                 committee.attack_limit_headers,
                 committee.attack_limit_certificates,
                 committee.attack_start_secs,
@@ -143,6 +132,8 @@ impl Core {
                 committee.kappa,
                 committee.reference,
                 committee.coverage,
+                committee.attack_open_every_secs,
+                committee.attack_open_for_secs,
             );
 
             if committee.attack_duration_secs > 0 {

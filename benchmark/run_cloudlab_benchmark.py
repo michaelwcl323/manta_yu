@@ -236,6 +236,10 @@ Examples:
     parser.add_argument('--no-attack-limit-certificates', dest='attack_limit_certificates', action='store_false',
                        help='Do not limit certificate broadcasts during the attack window')
     parser.set_defaults(attack_limit_certificates=True)
+    parser.add_argument('--attack-open-every-secs', type=int, default=0,
+                       help='Within the attack window, lift the filter every N seconds (0 disables pulsing)')
+    parser.add_argument('--attack-open-for-secs', type=int, default=0,
+                       help='How long each periodic open lasts (seconds); used with --attack-open-every-secs')
     
     args = parser.parse_args()
     
@@ -285,6 +289,8 @@ Examples:
                 'attack_group_size': args.attack_group_size,
                 'attack_limit_headers': args.attack_limit_headers,
                 'attack_limit_certificates': args.attack_limit_certificates,
+                'attack_open_every_secs': args.attack_open_every_secs,
+                'attack_open_for_secs': args.attack_open_for_secs,
             },
         )
         if not success:
