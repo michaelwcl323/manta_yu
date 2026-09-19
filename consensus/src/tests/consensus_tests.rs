@@ -49,8 +49,6 @@ pub fn mock_committee() -> Committee {
         attack_group_size: 0,
         attack_limit_headers: false,
         attack_limit_certificates: true,
-        attack_open_every_secs: 0,
-        attack_open_for_secs: 0,
     }
 }
 

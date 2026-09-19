@@ -49,8 +49,7 @@ class Committee:
                  solid_candidate_threshold=0, attack_enabled=False,
                  attack_start_secs=0, attack_duration_secs=0, attack_group_size=0,
                  attack_limit_headers=False,
-                 attack_limit_certificates=True,
-                 attack_open_every_secs=0, attack_open_for_secs=0):
+                 attack_limit_certificates=True):
         ''' The `addresses` field looks as follows:
             { 
                 "name": ["host", "host", ...],
@@ -87,8 +86,6 @@ class Committee:
             'attack_group_size': attack_group_size,
             'attack_limit_headers': attack_limit_headers,
             'attack_limit_certificates': attack_limit_certificates,
-            'attack_open_every_secs': attack_open_every_secs,
-            'attack_open_for_secs': attack_open_for_secs,
         }
         for name, hosts in addresses.items():
             host = hosts.pop(0)
@@ -187,8 +184,7 @@ class LocalCommittee(Committee):
                  solid_candidate_threshold=0, attack_enabled=False,
                  attack_start_secs=0, attack_duration_secs=0, attack_group_size=0,
                  attack_limit_headers=False,
-                 attack_limit_certificates=True,
-                 attack_open_every_secs=0, attack_open_for_secs=0):
+                 attack_limit_certificates=True):
         assert isinstance(names, list)
         assert all(isinstance(x, str) for x in names)
         assert isinstance(port, int)
@@ -213,8 +209,6 @@ class LocalCommittee(Committee):
             attack_group_size,
             attack_limit_headers,
             attack_limit_certificates,
-            attack_open_every_secs,
-            attack_open_for_secs,
         )
 
 
@@ -251,8 +245,6 @@ class NodeParameters:
             'attack_start_secs',
             'attack_duration_secs',
             'attack_group_size',
-            'attack_open_every_secs',
-            'attack_open_for_secs',
         ]
         for field in optional_int_fields:
             if field in json and not isinstance(json[field], int):

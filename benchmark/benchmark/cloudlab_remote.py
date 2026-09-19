@@ -1089,14 +1089,6 @@ class CloudLabBench:
             'attack_limit_certificates',
             True,
         )
-        attack_open_every_secs = node_parameters.json.get(
-            'attack_open_every_secs',
-            0,
-        )
-        attack_open_for_secs = node_parameters.json.get(
-            'attack_open_for_secs',
-            0,
-        )
         committee = Committee(
             addresses,
             self.settings.base_port,
@@ -1116,8 +1108,6 @@ class CloudLabBench:
             attack_group_size,
             attack_limit_headers,
             attack_limit_certificates,
-            attack_open_every_secs,
-            attack_open_for_secs,
         )
         committee.print(PathMaker.committee_file())
         
@@ -1761,8 +1751,6 @@ SCRIPTEOF'''
                                             'attack_group_size',
                                             'attack_limit_headers',
                                             'attack_limit_certificates',
-                                            'attack_open_every_secs',
-                                            'attack_open_for_secs',
                                             'enable_adaptive_intermediate_spill',
                                             'adaptive_intermediate_spill_trigger_digests',
                                             'adaptive_intermediate_spill_cap_digests',

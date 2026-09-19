@@ -6,7 +6,7 @@ use crypto::{Digest, PublicKey};
 use log::{error, warn};
 use network::SimpleSender;
 use store::Store;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::Receiver;
 
 /// A task dedicated to help other authorities by replying to their certificates requests.
@@ -47,10 +47,19 @@ impl Helper {
     }
 
     fn attack_active(&self) -> bool {
-        self.committee.attack_limit_certificates
-            && self
-                .committee
-                .attack_filter_engaged(self.boot_instant.elapsed())
+        if !self.committee.attack_enabled || !self.committee.attack_limit_certificates {
+            return false;
+        }
+        let elapsed = self.boot_instant.elapsed();
+        let start = Duration::from_secs(self.committee.attack_start_secs);
+        if elapsed < start {
+            return false;
+        }
+        let duration_secs = self.committee.attack_duration_secs;
+        if duration_secs == 0 {
+            return true;
+        }
+        elapsed < start + Duration::from_secs(duration_secs)
     }
 
     fn should_reply_to_requestor(&self, requestor: &PublicKey) -> bool {
