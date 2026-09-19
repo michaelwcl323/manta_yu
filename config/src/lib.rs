@@ -429,11 +429,10 @@ impl Committee {
         }
     }
 
-    /// Receiver-centric selective visibility rule used by the attack. Each recipient sees only the
-    /// minimum number of remote authors needed to reach `coverage` once its own author is counted:
-    /// first a deterministic rotating prefix of same-group peers, then a deterministic rotating
-    /// prefix of cross-group peers. Different recipients therefore keep different neighborhoods
-    /// while still seeing at most `coverage` total authors whenever possible.
+    /// Receiver-centric selective visibility rule used by the attack. Same-group visibility is
+    /// capped when `coverage` is smaller than the group size. Cross-group authors are all eligible
+    /// whenever cross-group input is needed, so the protocol may advance with whichever authors
+    /// arrive first instead of waiting for a preselected cross-group subset.
     pub fn selective_attack_allows_sender_to_recipient(
         &self,
         sender: &PublicKey,
@@ -467,20 +466,7 @@ impl Committee {
             return distance > 0 && distance <= same_group_limit;
         }
 
-        let allowed_cross_group_senders =
-            self.selective_attack_cross_group_sender_limit(recipient);
-        if allowed_cross_group_senders == 0 {
-            return false;
-        }
-        let Some((start, end)) = self.selective_attack_group_bounds(recipient_group) else {
-            return true;
-        };
-        let local_group_size = end.saturating_sub(start);
-        let other_group_size = self.size().saturating_sub(local_group_size);
-        let cross_group_start = recipient_rank % other_group_size.max(1);
-        let distance =
-            Self::selective_attack_rank_distance(sender_rank, cross_group_start, other_group_size);
-        distance < allowed_cross_group_senders
+        self.selective_attack_cross_group_sender_limit(recipient) > 0
     }
 
     /// Returns the primary addresses of the target primary.
@@ -826,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn selective_attack_keeps_minimal_total_visibility_and_rotates_cross_group_peers() {
+    fn selective_attack_allows_any_cross_group_sender_when_cross_input_is_needed() {
         let committee = attack_committee(10, 7);
         let authorities: Vec<_> = committee.authorities.keys().copied().collect();
         let recipient_a = authorities[0];
@@ -843,31 +829,16 @@ mod tests {
             &authorities[1],
             &recipient_a
         ));
-        assert!(committee.selective_attack_allows_sender_to_recipient(
-            &authorities[5],
-            &recipient_a
-        ));
-        assert!(committee.selective_attack_allows_sender_to_recipient(
-            &authorities[6],
-            &recipient_a
-        ));
-        assert!(!committee.selective_attack_allows_sender_to_recipient(
-            &authorities[7],
-            &recipient_a
-        ));
-
-        assert!(committee.selective_attack_allows_sender_to_recipient(
-            &authorities[6],
-            &recipient_b
-        ));
-        assert!(committee.selective_attack_allows_sender_to_recipient(
-            &authorities[7],
-            &recipient_b
-        ));
-        assert!(!committee.selective_attack_allows_sender_to_recipient(
-            &authorities[5],
-            &recipient_b
-        ));
+        for sender in &authorities[5..] {
+            assert!(committee.selective_attack_allows_sender_to_recipient(
+                sender,
+                &recipient_a
+            ));
+            assert!(committee.selective_attack_allows_sender_to_recipient(
+                sender,
+                &recipient_b
+            ));
+        }
     }
 
     #[test]

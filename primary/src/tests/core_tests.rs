@@ -910,13 +910,13 @@ async fn process_certificates() {
 }
 
 #[test]
-fn selective_attack_keeps_only_minimal_cross_group_senders() {
+fn selective_attack_allows_any_cross_group_sender_needed_for_coverage() {
     let committee = attack_committee(3);
     let authorities: Vec<_> = committee.authorities.keys().copied().collect();
 
     let sender_same_group = authorities[1];
-    let sender_other_group_allowed = authorities[2];
-    let sender_other_group_blocked = authorities[3];
+    let sender_other_group_a = authorities[2];
+    let sender_other_group_b = authorities[3];
     let recipient = authorities[0];
 
     assert!(committee.selective_attack_allows_sender_to_recipient(
@@ -924,11 +924,11 @@ fn selective_attack_keeps_only_minimal_cross_group_senders() {
         &recipient
     ));
     assert!(committee.selective_attack_allows_sender_to_recipient(
-        &sender_other_group_allowed,
+        &sender_other_group_a,
         &recipient
     ));
-    assert!(!committee.selective_attack_allows_sender_to_recipient(
-        &sender_other_group_blocked,
+    assert!(committee.selective_attack_allows_sender_to_recipient(
+        &sender_other_group_b,
         &recipient
     ));
 }
