@@ -286,6 +286,7 @@ class LogParser:
             ('Attack group size', 'attack_group_size'),
             ('Attack limit headers', 'attack_limit_headers'),
             ('Attack limit certificates', 'attack_limit_certificates'),
+            ('Attack cross-group delay ms', 'attack_cross_group_delay_ms'),
             ('Enable adaptive intermediate spill', 'enable_adaptive_intermediate_spill'),
             (
                 'Adaptive intermediate spill trigger digests',

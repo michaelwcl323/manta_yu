@@ -134,12 +134,13 @@ impl Core {
             tokio::time::sleep_until(attack_start).await;
             info!(
                 "start attack: headers_limited={} certificates_limited={} \
-                 start_secs={} duration_secs={} group_size={} kappa={} reference={} coverage={}",
+                 start_secs={} duration_secs={} group_size={} cross_group_delay_ms={} kappa={} reference={} coverage={}",
                 committee.attack_limit_headers,
                 committee.attack_limit_certificates,
                 committee.attack_start_secs,
                 committee.attack_duration_secs,
                 committee.attack_group_size,
+                committee.attack_cross_group_delay_ms,
                 committee.kappa,
                 committee.reference,
                 committee.coverage,
@@ -157,23 +158,23 @@ impl Core {
         });
     }
 
-    fn broadcast_targets(&self, filter_for_headers: bool) -> Vec<(PublicKey, std::net::SocketAddr)> {
-        let attack_active = if filter_for_headers {
+    fn broadcast_targets(&self, filter_for_headers: bool) -> Vec<(u64, std::net::SocketAddr)> {
+        let active = if filter_for_headers {
             self.attack_active_for_headers()
         } else {
             self.attack_active_for_certificates()
         };
-
         self.committee
             .others_primaries(&self.name)
             .into_iter()
-            .filter(|(recipient, _)| {
-                !attack_active
-                    || self
-                        .committee
-                        .selective_attack_allows_sender_to_recipient(&self.name, recipient)
+            .map(|(recipient, addresses)| {
+                let delay = if active {
+                    self.committee.attack_link_delay_ms(&self.name, &recipient)
+                } else {
+                    0
+                };
+                (delay, addresses.primary_to_primary)
             })
-            .map(|(recipient, addresses)| (recipient, addresses.primary_to_primary))
             .collect()
     }
 
@@ -248,8 +249,10 @@ impl Core {
         // Send to each primary individually so we can log per-node success/failure.
         let header_id = header.id.clone();
         let header_round = header.round;
-        for (_, address) in targets {
-            let handler = self.network.send(address, Bytes::from(bytes.clone())).await;
+        for (delay_ms, address) in targets {
+            let handler = self.network
+                .send_delayed(address, Bytes::from(bytes.clone()), Duration::from_millis(delay_ms))
+                .await;
             let id = header_id.clone();
             tokio::spawn(async move {
                 match handler.await {
@@ -470,8 +473,10 @@ impl Core {
             let targets = self.broadcast_targets(false);
             let bytes = bincode::serialize(&PrimaryMessage::Certificate(certificate.clone()))
                 .expect("Failed to serialize our own certificate");
-            for (_, address) in targets {
-                let handler = self.network.send(address, Bytes::from(bytes.clone())).await;
+            for (delay_ms, address) in targets {
+                let handler = self.network
+                    .send_delayed(address, Bytes::from(bytes.clone()), Duration::from_millis(delay_ms))
+                    .await;
                 let id = cert_id.clone();
                 tokio::spawn(async move {
                     match handler.await {

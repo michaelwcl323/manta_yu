@@ -71,6 +71,36 @@ impl ReliableSender {
         receiver
     }
 
+    /// Schedule delivery without blocking the caller or other messages on this connection.
+    pub async fn send_delayed(
+        &mut self,
+        address: SocketAddr,
+        data: Bytes,
+        delay: Duration,
+    ) -> CancelHandler {
+        if delay.is_zero() {
+            return self.send(address, data).await;
+        }
+        let (sender, receiver) = oneshot::channel();
+        let tx = self
+            .connections
+            .entry(address)
+            .or_insert_with(|| Self::spawn_connection(address))
+            .clone();
+        tokio::spawn(async move {
+            sleep(delay).await;
+            if !sender.is_closed() {
+                let _ = tx
+                    .send(InnerMessage {
+                        data,
+                        cancel_handler: sender,
+                    })
+                    .await;
+            }
+        });
+        receiver
+    }
+
     /// Broadcast the message to all specified addresses in a reliable manner. It returns a vector of
     /// cancel handlers ordered as the input `addresses` vector.
     pub async fn broadcast(

@@ -5,8 +5,8 @@ use config::Committee;
 use crypto::{Digest, PublicKey};
 use log::{error, warn};
 use network::SimpleSender;
-use store::Store;
 use std::time::{Duration, Instant};
+use store::Store;
 use tokio::sync::mpsc::Receiver;
 
 /// A task dedicated to help other authorities by replying to their certificates requests.
@@ -62,13 +62,6 @@ impl Helper {
         elapsed < start + Duration::from_secs(duration_secs)
     }
 
-    fn should_reply_to_requestor(&self, requestor: &PublicKey) -> bool {
-        !self.attack_active()
-            || self
-                .committee
-                .selective_attack_allows_sender_to_recipient(&self.name, requestor)
-    }
-
     async fn run(&mut self) {
         while let Some((digests, origin)) = self.rx_primaries.recv().await {
             // TODO [issue #195]: Do some accounting to prevent bad nodes from monopolizing our resources.
@@ -82,9 +75,11 @@ impl Helper {
                 }
             };
 
-            if !self.should_reply_to_requestor(&origin) {
-                continue;
-            }
+            let delay_ms = if self.attack_active() {
+                self.committee.attack_link_delay_ms(&self.name, &origin)
+            } else {
+                0
+            };
 
             // Reply to the request (the best we can).
             for digest in digests {
@@ -95,7 +90,13 @@ impl Helper {
                             .expect("Failed to deserialize our own certificate");
                         let bytes = bincode::serialize(&PrimaryMessage::Certificate(certificate))
                             .expect("Failed to serialize our own certificate");
-                        self.network.send(address, Bytes::from(bytes)).await;
+                        self.network
+                            .send_delayed(
+                                address,
+                                Bytes::from(bytes),
+                                Duration::from_millis(delay_ms),
+                            )
+                            .await;
                     }
                     Ok(None) => (),
                     Err(e) => error!("{}", e),

@@ -30,6 +30,10 @@ fn default_solid_candidate_threshold() -> usize {
     0
 }
 
+fn default_attack_cross_group_delay_ms() -> u64 {
+    500
+}
+
 fn default_attack_enabled() -> bool {
     false
 }
@@ -258,10 +262,13 @@ pub struct Committee {
     /// solid-step round inside the wave that just ended.
     #[serde(default)]
     pub solid_commit_trigger_on_solid_step: bool,
-    /// Enables the selective-broadcast attack that limits cross-group visibility after a
+    /// Enables cross-group message delay after a
     /// fixed delay from node startup.
     #[serde(default = "default_attack_enabled")]
     pub attack_enabled: bool,
+    /// Extra cross-group delivery delay in milliseconds during the attack; zero disables delay.
+    #[serde(default = "default_attack_cross_group_delay_ms")]
+    pub attack_cross_group_delay_ms: u64,
     /// Delay in seconds before the selective-broadcast attack becomes active.
     #[serde(default = "default_attack_start_secs")]
     pub attack_start_secs: u64,
@@ -271,10 +278,10 @@ pub struct Committee {
     /// Size of the first attack group. When set to 0, split the committee in half.
     #[serde(default = "default_attack_group_size")]
     pub attack_group_size: usize,
-    /// Whether to also limit header broadcasts once the attack starts.
+    /// Whether to delay cross-group header broadcasts during the attack.
     #[serde(default = "default_attack_limit_headers")]
     pub attack_limit_headers: bool,
-    /// Whether to limit certificate broadcasts and sync replies once the attack starts.
+    /// Whether to delay cross-group certificate broadcasts and sync replies during the attack.
     #[serde(default = "default_attack_limit_certificates")]
     pub attack_limit_certificates: bool,
 }
@@ -341,6 +348,14 @@ impl Committee {
 
     pub fn max_threshold(&self) -> Stake {
         self.coverage as Stake
+    }
+
+    /// Delay for a cross-group transport link. The caller applies the attack window and message switch.
+    pub fn attack_link_delay_ms(&self, sender: &PublicKey, recipient: &PublicKey) -> u64 {
+        match (self.selective_attack_group(sender), self.selective_attack_group(recipient)) {
+            (Some(a), Some(b)) if a != b => self.attack_cross_group_delay_ms,
+            _ => 0,
+        }
     }
 
     /// Returns the size of the first attack group. When no explicit split is configured,
@@ -429,7 +444,9 @@ impl Committee {
         }
     }
 
-    /// Receiver-centric selective visibility rule used by the attack. Each recipient sees only the
+    /// Legacy receiver-centric visibility rule, retained for comparison tests.
+    /// Runtime broadcasts and sync replies now use `attack_link_delay_ms` instead.
+    /// In this legacy rule, each recipient sees only the
     /// minimum number of remote authors needed to reach `coverage` once its own author is counted:
     /// first a deterministic rotating prefix of same-group peers, then a deterministic rotating
     /// prefix of cross-group peers. Different recipients therefore keep different neighborhoods
@@ -702,6 +719,7 @@ mod tests {
             solid_candidate_threshold: 0,
             solid_commit_trigger_on_solid_step: false,
             attack_enabled: false,
+            attack_cross_group_delay_ms: 500,
             attack_start_secs: 0,
             attack_duration_secs: 0,
             attack_group_size: 0,
@@ -902,4 +920,20 @@ mod tests {
             &recipient
         ));
     }
+    #[test]
+    fn cross_group_delay_is_independent_of_coverage() {
+        for coverage in [4, 7, 10] {
+            let mut committee = attack_committee(10, coverage);
+            committee.attack_cross_group_delay_ms = 500;
+            let names: Vec<_> = committee.authorities.keys().cloned().collect();
+            assert_eq!(committee.attack_link_delay_ms(&names[0], &names[1]), 0);
+            assert_eq!(committee.attack_link_delay_ms(&names[0], &names[5]), 500);
+            assert_eq!(committee.attack_link_delay_ms(&names[5], &names[0]), 500);
+            committee.attack_cross_group_delay_ms = 0;
+            assert_eq!(committee.attack_link_delay_ms(&names[0], &names[5]), 0);
+        }
+    }
+
+
+
 }

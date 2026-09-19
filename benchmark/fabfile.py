@@ -264,7 +264,7 @@ def cloudlab_wan(ctx, action='setup', settings_file='cloudlab_settings.json'):
 @task
 def cloudlab_remote(
     ctx,
-    debug=False,
+    debug=True,
     sigma=1,
     kappa=2,
     reference=4,
@@ -295,11 +295,12 @@ def cloudlab_remote(
     solid_candidate_threshold=0,
 
     attack_enabled=True,
-    attack_start_secs=80,
-    attack_duration_secs=5,
+    attack_start_secs=60,
+    attack_duration_secs=60,
     attack_group_size=5,
     attack_limit_headers=False,
     attack_limit_certificates=True,
+    attack_cross_group_delay_ms=500,
 
     # 这是payload 的调度，第三轮和第二轮的顶点接收payload，目前以第三轮顶点优先，多余的给第二轮
     enable_adaptive_intermediate_spill=False, # payload shceduling
@@ -307,7 +308,7 @@ def cloudlab_remote(
     adaptive_intermediate_spill_cap_digests=1,
 
     #会根据这些tag会自动生成目录，将运行结果分类 目录是 design_tag/network_tag/load_tag/
-    design_tag='experiment2_attack',
+    design_tag='experiment2_test',
     network_tag='geo',
     load_tag='balanced_50_50',
 ):
@@ -326,7 +327,7 @@ def cloudlab_remote(
         'workers': 1,
         'collocate': True,
         'rate_type': 'balanced',
-        'rate': [80000],
+        'rate': [100000],
         # 'rate': [40000,60000],
         # 'rate': [40000,80000,100000,120000,140000,150000,160000,180000],
         # 'rate': [130000],
@@ -364,6 +365,7 @@ def cloudlab_remote(
         'attack_group_size': int(attack_group_size),
         'attack_limit_headers': attack_limit_headers,
         'attack_limit_certificates': attack_limit_certificates,
+        'attack_cross_group_delay_ms': int(attack_cross_group_delay_ms),
         'enable_adaptive_intermediate_spill': enable_adaptive_intermediate_spill,
         'adaptive_intermediate_spill_trigger_digests': int(adaptive_intermediate_spill_trigger_digests),
         'adaptive_intermediate_spill_cap_digests': int(adaptive_intermediate_spill_cap_digests),

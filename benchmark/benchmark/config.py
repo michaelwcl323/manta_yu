@@ -49,7 +49,7 @@ class Committee:
                  solid_candidate_threshold=0, attack_enabled=False,
                  attack_start_secs=0, attack_duration_secs=0, attack_group_size=0,
                  attack_limit_headers=False,
-                 attack_limit_certificates=True):
+                 attack_limit_certificates=True, attack_cross_group_delay_ms=500):
         ''' The `addresses` field looks as follows:
             { 
                 "name": ["host", "host", ...],
@@ -86,6 +86,7 @@ class Committee:
             'attack_group_size': attack_group_size,
             'attack_limit_headers': attack_limit_headers,
             'attack_limit_certificates': attack_limit_certificates,
+            'attack_cross_group_delay_ms': attack_cross_group_delay_ms,
         }
         for name, hosts in addresses.items():
             host = hosts.pop(0)
@@ -184,7 +185,7 @@ class LocalCommittee(Committee):
                  solid_candidate_threshold=0, attack_enabled=False,
                  attack_start_secs=0, attack_duration_secs=0, attack_group_size=0,
                  attack_limit_headers=False,
-                 attack_limit_certificates=True):
+                 attack_limit_certificates=True, attack_cross_group_delay_ms=500):
         assert isinstance(names, list)
         assert all(isinstance(x, str) for x in names)
         assert isinstance(port, int)
@@ -209,6 +210,7 @@ class LocalCommittee(Committee):
             attack_group_size,
             attack_limit_headers,
             attack_limit_certificates,
+            attack_cross_group_delay_ms,
         )
 
 
@@ -245,11 +247,15 @@ class NodeParameters:
             'attack_start_secs',
             'attack_duration_secs',
             'attack_group_size',
+            'attack_cross_group_delay_ms',
         ]
         for field in optional_int_fields:
             if field in json and not isinstance(json[field], int):
                 raise ConfigError(f'Invalid parameters type for {field}')
 
+        delay = json.get('attack_cross_group_delay_ms', 500)
+        if type(delay) is not int or delay < 0:
+            raise ConfigError('attack_cross_group_delay_ms must be a non-negative integer')
         self.json = json
 
     def print(self, filename):

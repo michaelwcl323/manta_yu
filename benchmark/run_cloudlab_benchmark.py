@@ -227,15 +227,17 @@ Examples:
     parser.add_argument('--attack-group-size', type=int, default=5,
                        help='Size of the first attack group; 0 splits nodes evenly')
     parser.add_argument('--attack-limit-headers', dest='attack_limit_headers', action='store_true',
-                       help='Limit cross-group header broadcasts during the attack window')
+                       help='Delay cross-group header broadcasts during the attack window')
     parser.add_argument('--no-attack-limit-headers', dest='attack_limit_headers', action='store_false',
                        help='Do not limit header broadcasts during the attack window')
     parser.set_defaults(attack_limit_headers=False)
     parser.add_argument('--attack-limit-certificates', dest='attack_limit_certificates', action='store_true',
-                       help='Limit cross-group certificate broadcasts and sync replies during the attack window')
+                       help='Delay cross-group certificate broadcasts and sync replies during the attack window')
     parser.add_argument('--no-attack-limit-certificates', dest='attack_limit_certificates', action='store_false',
                        help='Do not limit certificate broadcasts during the attack window')
     parser.set_defaults(attack_limit_certificates=True)
+    parser.add_argument('--attack-cross-group-delay-ms', type=int, default=500,
+                        help='Extra cross-group message delay during attack (milliseconds)')
     
     args = parser.parse_args()
     
@@ -285,6 +287,7 @@ Examples:
                 'attack_group_size': args.attack_group_size,
                 'attack_limit_headers': args.attack_limit_headers,
                 'attack_limit_certificates': args.attack_limit_certificates,
+                'attack_cross_group_delay_ms': args.attack_cross_group_delay_ms,
             },
         )
         if not success:

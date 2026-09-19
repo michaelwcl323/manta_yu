@@ -65,3 +65,35 @@ async fn retry() {
     // Ensure the server received the message (ie. it did not panic).
     assert!(handle.await.is_ok());
 }
+
+#[tokio::test]
+async fn delayed_message_does_not_block_immediate_message() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+        assert_eq!(framed.next().await.unwrap().unwrap().as_ref(), b"immediate");
+        framed.send(Bytes::from_static(b"ack")).await.unwrap();
+        assert_eq!(framed.next().await.unwrap().unwrap().as_ref(), b"delayed");
+        framed.send(Bytes::from_static(b"ack")).await.unwrap();
+    });
+    let mut sender = ReliableSender::new();
+    let started = tokio::time::Instant::now();
+    let delayed = sender
+        .send_delayed(
+            address,
+            Bytes::from_static(b"delayed"),
+            Duration::from_millis(200),
+        )
+        .await;
+    let immediate = sender.send(address, Bytes::from_static(b"immediate")).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        immediate.await.unwrap();
+        delayed.await.unwrap();
+        server.await.unwrap();
+    })
+    .await
+    .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(200));
+}

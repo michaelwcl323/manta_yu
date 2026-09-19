@@ -40,3 +40,30 @@ async fn broadcast() {
     // Ensure all servers received the broadcast.
     assert!(try_join_all(handles).await.is_ok());
 }
+
+#[tokio::test]
+async fn delayed_reply_does_not_block_immediate_reply() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+        assert_eq!(framed.next().await.unwrap().unwrap().as_ref(), b"immediate");
+        assert_eq!(framed.next().await.unwrap().unwrap().as_ref(), b"delayed");
+    });
+    let mut sender = SimpleSender::new();
+    let started = tokio::time::Instant::now();
+    sender
+        .send_delayed(
+            address,
+            Bytes::from_static(b"delayed"),
+            std::time::Duration::from_millis(200),
+        )
+        .await;
+    sender.send(address, Bytes::from_static(b"immediate")).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+}

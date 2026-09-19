@@ -1033,6 +1033,8 @@ class CloudLabBench:
             attack_group_size,
             attack_limit_headers,
             attack_limit_certificates,
+            attack_cross_group_delay_ms=node_parameters.json.get(
+                'attack_cross_group_delay_ms', 500),
         )
         committee.print(PathMaker.committee_file())
         
@@ -1667,6 +1669,7 @@ SCRIPTEOF'''
                                             'attack_group_size',
                                             'attack_limit_headers',
                                             'attack_limit_certificates',
+                                            'attack_cross_group_delay_ms',
                                             'enable_adaptive_intermediate_spill',
                                             'adaptive_intermediate_spill_trigger_digests',
                                             'adaptive_intermediate_spill_cap_digests',

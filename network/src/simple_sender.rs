@@ -19,6 +19,7 @@ pub mod simple_sender_tests;
 
 /// We keep alive one TCP connection per peer, each connection is handled by a separate task (called `Connection`).
 /// We communicate with our 'connections' through a dedicated channel kept by the HashMap called `connections`.
+#[derive(Clone)]
 pub struct SimpleSender {
     /// A map holding the channels to our connections.
     connections: HashMap<SocketAddr, Sender<Bytes>>,
@@ -62,6 +63,27 @@ impl SimpleSender {
         if tx.send(data).await.is_ok() {
             self.connections.insert(address, tx);
         }
+    }
+
+    /// Schedule a best-effort reply without blocking the helper's request loop.
+    pub async fn send_delayed(
+        &mut self,
+        address: SocketAddr,
+        data: Bytes,
+        delay: std::time::Duration,
+    ) {
+        if delay.is_zero() {
+            self.send(address, data).await;
+            return;
+        }
+        self.connections
+            .entry(address)
+            .or_insert_with(|| Self::spawn_connection(address));
+        let mut network = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            network.send(address, data).await;
+        });
     }
 
     /// Try (best-effort) to broadcast the message to all specified addresses.

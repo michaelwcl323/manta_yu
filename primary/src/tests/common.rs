@@ -74,6 +74,7 @@ pub fn committee() -> Committee {
         solid_candidate_threshold: 0,
         solid_commit_trigger_on_solid_step: false,
         attack_enabled: false,
+        attack_cross_group_delay_ms: 500,
         attack_start_secs: 0,
         attack_duration_secs: 0,
         attack_group_size: 0,
