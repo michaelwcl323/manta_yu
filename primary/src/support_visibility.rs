@@ -170,6 +170,7 @@ impl SupportVisibilityGate {
         if !committee.attack_support_visibility || delay.is_zero() {
             return VisibilityAction::Deliver;
         }
+        self.note_certificate(certificate, committee);
         let round = certificate.round();
         let Some(leader_round) = round.checked_sub(1) else {
             return VisibilityAction::Deliver;
@@ -177,8 +178,6 @@ impl SupportVisibilityGate {
         if !Self::is_leader_round(committee, leader_round) {
             return VisibilityAction::Deliver;
         }
-
-        self.note_certificate(certificate, committee);
         let layer = self.layer_mut(leader_round);
         if layer.stopped || layer.delivered.contains(&certificate.origin()) {
             return VisibilityAction::Deliver;

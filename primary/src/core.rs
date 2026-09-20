@@ -608,10 +608,17 @@ impl Core {
     }
 
     fn hold_support_visibility(&mut self, certificate: &Certificate) -> bool {
-        if !self.committee.attack_support_visibility || !self.attack_active_for_certificates() {
+        if !self.committee.attack_support_visibility {
             return false;
         }
         let delay = Duration::from_millis(self.committee.attack_cross_group_delay_ms);
+        if !self.attack_active_for_certificates() || delay.is_zero() {
+            self.visibility_gate
+                .lock()
+                .expect("support visibility gate lock")
+                .note_certificate(certificate, &self.committee);
+            return false;
+        }
         let (action, immediate, delayed) = {
             let mut gate = self
                 .visibility_gate
