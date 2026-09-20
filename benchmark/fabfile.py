@@ -290,7 +290,7 @@ def cloudlab_remote(
 
     enable_fast_coin=False, # 关闭提前提交路径，保留 regular solid path
     solid_commit_trigger_on_solid_step=False,
-    enable_commit_recheck=True,
+    enable_commit_recheck=False,
     fast_coin_candidate_threshold=0,
     solid_candidate_threshold=0,
 
