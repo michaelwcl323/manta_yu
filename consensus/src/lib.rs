@@ -33,6 +33,9 @@ struct State {
     certificate_index: HashMap<Digest, DagPosition>,
     /// Fast lookup for both certificate digests and header ids. Used by logging / visualization.
     digest_index: HashMap<Digest, DagPosition>,
+    /// Leaders whose current-wave support check failed. They may only be packed
+    /// by a later successful leader at least one full wave later.
+    failed_leader_rounds: HashSet<Round>,
 }
 
 impl State {
@@ -44,6 +47,7 @@ impl State {
             dag: HashMap::new(),
             certificate_index: HashMap::new(),
             digest_index: HashMap::new(),
+            failed_leader_rounds: HashSet::new(),
         };
 
         for certificate in genesis {
@@ -809,8 +813,9 @@ leader_digest(cert)= {:?} -> {:?} (node_id={})",
         pending.seen_support_certificate_digests =
             Self::support_certificate_digests(state, support_round);
         if stake < threshold {
+            state.failed_leader_rounds.insert(leader_round);
             info!(
-                "DAG_COMMIT_CHECK path={} leader_round={} leader_node={} support_round={} support_basis={} trigger_round={} stake={} threshold={} result=insufficient_stake support_set={:?}",
+                "DAG_COMMIT_CHECK path={} leader_round={} leader_node={} support_round={} support_basis={} trigger_round={} stake={} threshold={} result=insufficient_stake support_set={:?} current_wave_denied recheck={}",
                 path.log_label(),
                 leader_round,
                 leader_node,
@@ -819,7 +824,8 @@ leader_digest(cert)= {:?} -> {:?} (node_id={})",
                 trigger_round,
                 stake,
                 threshold,
-                support_nodes
+                support_nodes,
+                self.committee.enable_commit_recheck
             );
             if log_enabled!(log::Level::Debug) && stake == 0 {
                 debug!(
@@ -1008,8 +1014,22 @@ leader_digest(cert)= {:?} -> {:?} (node_id={})",
                 }
             };
             if self.linked(cur, prev_leader, state) {
-                to_commit.push(prev_leader.clone());
-                cur = prev_leader;
+                let gap = end_round.saturating_sub(r);
+                if state.failed_leader_rounds.contains(&r) && gap < wave {
+                    info!(
+                        "order_leaders skip same-wave walk-back of failed leader_round={} from tip={} gap={} wave={}",
+                        r, end_round, gap, wave
+                    );
+                } else {
+                    if state.failed_leader_rounds.contains(&r) {
+                        info!(
+                            "order_leaders next-wave pack of failed leader_round={} from tip={} gap={} wave={}",
+                            r, end_round, gap, wave
+                        );
+                    }
+                    to_commit.push(prev_leader.clone());
+                    cur = prev_leader;
+                }
             }
             if r < start + wave {
                 break;

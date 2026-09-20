@@ -666,9 +666,10 @@ class CloudLabBench:
         
         cmd = [
             f'cd {repo_name} || (echo "Repository {repo_name} not found. Please run: fab cloudlab-install" && exit 1)',
-            'git fetch',
+            'git fetch origin',
             f'git checkout {branch}',
-            'git pull',
+            f'git reset --hard origin/{branch}',
+            f'git rev-parse --short HEAD && git log -1 --oneline',
             # Recover from corrupted rustup metadata (e.g. empty settings.toml).
             'if [ -f "$HOME/.rustup/settings.toml" ] && ! grep -q "^version" "$HOME/.rustup/settings.toml"; '
             'then echo "Detected corrupted rustup settings.toml; resetting it"; rm -f "$HOME/.rustup/settings.toml"; fi',

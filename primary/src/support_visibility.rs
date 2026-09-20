@@ -15,19 +15,22 @@ const MAX_GENERATED_SUPPORT: usize = 6;
 
 /// Receiver-side visibility attack against one wave leader at a time.
 ///
-/// Observation-layer support certificates:
-/// - Core still forwards every certificate to the proposer, so coverage=7 and
-///   coverage=10 keep the same DAG pace;
-/// - consensus sees at most the 3 lowest-index supporters until `delay`;
-/// - once at least 4 supporters exist, extras stay held for `delay` even if
-///   generated support later exceeds 6 or reaches coverage.
+/// Attack strength is independent of coverage:
+/// - proposer always receives every certificate;
+/// - consensus sees at most the 3 lowest-index observation-layer supporters
+///   until `delay`, once generated support is at least 4;
+/// - extras stay held even if generated support later exceeds 6 or reaches coverage.
 ///
-/// Next-layer certificates are never held. Kappa=2's wave-start check looks at
-/// the observation layer and misses the extras; kappa=3's check looks at the
-/// extra layer, which is not held.
+/// Next-layer (leader+2) certificates are never held. Kappa=2's wave-start
+/// check looks at the observation layer and misses the extras; kappa=3's check
+/// looks at the extra layer, which is not held.
+///
+/// Only one leader is under hold at a time, so kappa=2 can still commit on
+/// the *next* wave after missing the current one.
 #[derive(Clone, Debug)]
 pub struct SupportVisibilityGate {
     layers: HashMap<Round, LayerView>,
+    active_hold_leader: Option<Round>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +56,7 @@ impl SupportVisibilityGate {
     pub fn new() -> Self {
         Self {
             layers: HashMap::new(),
+            active_hold_leader: None,
         }
     }
 
@@ -145,10 +149,11 @@ impl SupportVisibilityGate {
                     (layer.leader_header_id.clone(), layer.leader_digest.clone())
                 {
                     if Self::certificate_supports(certificate, &header_id, &digest) {
+                        let first = layer.next_layer_supporters.is_empty();
                         layer.next_layer_supporters.insert(certificate.origin());
-                        if layer.next_layer_supporters.len() == committee.coverage {
+                        if first || layer.next_layer_supporters.len() == MIN_GENERATED_SUPPORT {
                             info!(
-                                "SUPPORT_VISIBILITY next layer inherited leader_round={} next_layer_supporters={} extras still delayed",
+                                "SUPPORT_VISIBILITY extra layer inherited leader_round={} extra_layer_support={} extras still delayed",
                                 leader_round,
                                 layer.next_layer_supporters.len()
                             );
@@ -192,30 +197,48 @@ impl SupportVisibilityGate {
             return VisibilityAction::Deliver;
         }
 
-        let supporters = Self::generated_supporters(layer);
-        if Self::is_immediate_supporter(committee, &certificate.origin(), &supporters) {
-            return VisibilityAction::Deliver;
-        }
-
+        // Park every observation-layer supporter until take_decided can pick a
+        // stable lowest-3 set. Delivering "current immediate" on arrival lets
+        // high-index certs leak into consensus before lower-index ones appear.
         let author = certificate.origin();
         layer.deferred.insert(author, certificate.clone());
         info!(
-            "SUPPORT_VISIBILITY hold leader_round={} author_index={:?} generated_support={} immediate={} delay_ms={}",
+            "SUPPORT_VISIBILITY park leader_round={} author_index={:?} generated_support={} delay_ms={}",
             leader_round,
             committee.authority_index(&author),
-            supporters.len(),
-            MAX_IMMEDIATE_SUPPORT,
+            Self::generated_supporters(layer).len(),
             delay.as_millis()
         );
         VisibilityAction::Park
     }
 
     pub fn mark_delivered(&mut self, certificate: &Certificate) {
-        if let Some(leader_round) = certificate.round().checked_sub(1) {
-            if let Some(layer) = self.layers.get_mut(&leader_round) {
-                layer.deferred.remove(&certificate.origin());
-                layer.delay_armed.remove(&certificate.origin());
-                layer.delivered.insert(certificate.origin());
+        let Some(leader_round) = certificate.round().checked_sub(1) else {
+            return;
+        };
+        let clear_hold = if let Some(layer) = self.layers.get_mut(&leader_round) {
+            layer.deferred.remove(&certificate.origin());
+            layer.delay_armed.remove(&certificate.origin());
+            layer.delivered.insert(certificate.origin());
+            self.active_hold_leader == Some(leader_round)
+                && layer.deferred.is_empty()
+                && layer.delay_armed.is_empty()
+        } else {
+            false
+        };
+        if clear_hold {
+            info!(
+                "SUPPORT_VISIBILITY release hold leader_round={}",
+                leader_round
+            );
+            self.active_hold_leader = None;
+        }
+    }
+
+    fn release_deferred(layer: &mut LayerView, immediate: &mut Vec<Certificate>) {
+        for (author, cert) in layer.deferred.drain() {
+            if !layer.delay_armed.contains(&author) {
+                immediate.push(cert);
             }
         }
     }
@@ -227,21 +250,63 @@ impl SupportVisibilityGate {
     ) -> (Vec<Certificate>, Vec<Certificate>) {
         let mut immediate = Vec::new();
         let mut delayed = Vec::new();
-        for layer in self.layers.values_mut() {
-            let supporters = Self::generated_supporters(layer);
-            let generated = supporters.len();
-            let layer_size = layer.arrived.len();
+        let mut leader_rounds: Vec<Round> = self.layers.keys().copied().collect();
+        leader_rounds.sort_unstable();
+        for leader_round in leader_rounds {
+            let generated = self
+                .layers
+                .get(&leader_round)
+                .map(Self::generated_supporters)
+                .map(|supporters| supporters.len())
+                .unwrap_or(0);
+            let layer_size = self
+                .layers
+                .get(&leader_round)
+                .map(|layer| layer.arrived.len())
+                .unwrap_or(0);
             if generated < MIN_GENERATED_SUPPORT {
+                // Not an attack case: too few supporters were generated.
+                // Coverage must not decide this — wait until the layer is full.
                 if layer_size >= committee.size() {
-                    for (author, cert) in layer.deferred.drain() {
-                        if !layer.delay_armed.contains(&author) {
-                            immediate.push(cert);
-                        }
+                    if let Some(layer) = self.layers.get_mut(&leader_round) {
+                        Self::release_deferred(layer, &mut immediate);
                     }
                 }
                 continue;
             }
 
+            let active = self.active_hold_leader;
+            match active {
+                Some(active_round) if active_round != leader_round => {
+                    // Another leader is already under hold. Leave this
+                    // observation layer fully visible so kappa=2 can still
+                    // commit on the next wave.
+                    info!(
+                        "SUPPORT_VISIBILITY skip leader_round={} active_hold={} generated_support={}",
+                        leader_round, active_round, generated
+                    );
+                    if let Some(layer) = self.layers.get_mut(&leader_round) {
+                        Self::release_deferred(layer, &mut immediate);
+                    }
+                    continue;
+                }
+                None => {
+                    self.active_hold_leader = Some(leader_round);
+                    info!(
+                        "SUPPORT_VISIBILITY arm leader_round={} generated_support={} immediate={} coverage_ignored={}",
+                        leader_round,
+                        generated,
+                        MAX_IMMEDIATE_SUPPORT,
+                        committee.coverage
+                    );
+                }
+                Some(_) => {}
+            }
+
+            let Some(layer) = self.layers.get_mut(&leader_round) else {
+                continue;
+            };
+            let supporters = Self::generated_supporters(layer);
             let delay_armed = layer.delay_armed.clone();
             let mut extras = Vec::new();
             layer.deferred.retain(|author, cert| {
@@ -264,9 +329,10 @@ impl SupportVisibilityGate {
             }
             if newly_armed > 0 {
                 info!(
-                    "SUPPORT_VISIBILITY hold leader_round={} generated_support={} delayed={} delay_ms={}",
-                    layer.leader_round,
+                    "SUPPORT_VISIBILITY hold leader_round={} generated_support={} visible={} delayed={} delay_ms={}",
+                    leader_round,
                     generated,
+                    MAX_IMMEDIATE_SUPPORT,
                     newly_armed,
                     delay.as_millis()
                 );
@@ -307,12 +373,42 @@ impl Default for SupportVisibilityGate {
 #[cfg(test)]
 mod tests {
     use super::{
-        SupportVisibilityGate, MAX_GENERATED_SUPPORT, MAX_IMMEDIATE_SUPPORT, MIN_GENERATED_SUPPORT,
+        SupportVisibilityGate, VisibilityAction, MAX_IMMEDIATE_SUPPORT, MAX_GENERATED_SUPPORT,
+        MIN_GENERATED_SUPPORT,
     };
+    use crate::messages::{Certificate, Header};
+    use crypto::Hash as _;
+    use crypto::PublicKey;
     use std::collections::HashSet;
+    use std::time::Duration;
 
     fn supporter_set(indices: &[usize], names: &[crypto::PublicKey]) -> HashSet<crypto::PublicKey> {
         indices.iter().map(|index| names[*index]).collect()
+    }
+
+    fn attack_committee() -> config::Committee {
+        let mut committee = crate::common::committee();
+        committee.attack_support_visibility = true;
+        committee.sigma = 1;
+        committee.kappa = 2;
+        committee.coverage = 3;
+        committee
+    }
+
+    fn cert(author: PublicKey, round: u64, wave: HashSet<crypto::Digest>) -> Certificate {
+        Certificate {
+            header: Header {
+                author,
+                round,
+                solid_wave_vertices: wave,
+                ..Header::default()
+            },
+            ..Certificate::default()
+        }
+    }
+
+    fn names(committee: &config::Committee) -> Vec<PublicKey> {
+        committee.authorities.keys().copied().collect()
     }
 
     #[test]
@@ -353,5 +449,96 @@ mod tests {
             SupportVisibilityGate::leader_of_round(&committee, 5),
             Some(names[5 % names.len()])
         );
+    }
+
+    #[test]
+    fn high_index_first_still_holds_all_but_lowest_three() {
+        let committee = attack_committee();
+        let names = names(&committee);
+        let leader = SupportVisibilityGate::leader_of_round(&committee, 1).unwrap();
+        let leader_cert = cert(leader, 1, HashSet::new());
+        let wave = HashSet::from([leader_cert.header.id.clone(), leader_cert.digest()]);
+        let delay = Duration::from_millis(200);
+        let mut gate = SupportVisibilityGate::new();
+
+        assert_eq!(
+            gate.action(&leader_cert, &committee, delay),
+            VisibilityAction::Deliver
+        );
+
+        // Arrive high-index first so the old "current immediate" rule would leak them.
+        for author in names.iter().rev() {
+            let support = cert(*author, 2, wave.clone());
+            assert_eq!(
+                gate.action(&support, &committee, delay),
+                VisibilityAction::Park
+            );
+        }
+
+        let (immediate, delayed) = gate.take_decided(&committee, delay);
+        assert_eq!(immediate.len(), MAX_IMMEDIATE_SUPPORT);
+        assert_eq!(delayed.len(), 1);
+        let immediate_authors: HashSet<_> = immediate.iter().map(|c| c.origin()).collect();
+        assert!(immediate_authors.contains(&names[0]));
+        assert!(immediate_authors.contains(&names[1]));
+        assert!(immediate_authors.contains(&names[2]));
+        assert_eq!(delayed[0].origin(), names[3]);
+        // Coverage is 3; extras must still be held once generated >= 4.
+        assert!(committee.coverage < names.len());
+    }
+
+    #[test]
+    fn extra_layer_is_never_held() {
+        let committee = attack_committee();
+        let leader = SupportVisibilityGate::leader_of_round(&committee, 1).unwrap();
+        let leader_cert = cert(leader, 1, HashSet::new());
+        let wave = HashSet::from([leader_cert.header.id.clone(), leader_cert.digest()]);
+        let delay = Duration::from_millis(200);
+        let mut gate = SupportVisibilityGate::new();
+        gate.action(&leader_cert, &committee, delay);
+
+        let extra = cert(names(&committee)[0], 3, wave);
+        assert_eq!(
+            gate.action(&extra, &committee, delay),
+            VisibilityAction::Deliver
+        );
+        let (immediate, delayed) = gate.take_decided(&committee, delay);
+        assert!(immediate.is_empty());
+        assert!(delayed.is_empty());
+    }
+
+    #[test]
+    fn one_leader_at_a_time_leaves_next_observation_visible() {
+        let committee = attack_committee();
+        let names = names(&committee);
+        let delay = Duration::from_millis(200);
+        let mut gate = SupportVisibilityGate::new();
+
+        let leader_1 = SupportVisibilityGate::leader_of_round(&committee, 1).unwrap();
+        let leader_1_cert = cert(leader_1, 1, HashSet::new());
+        let wave_1 = HashSet::from([leader_1_cert.header.id.clone(), leader_1_cert.digest()]);
+        gate.action(&leader_1_cert, &committee, delay);
+        for author in &names {
+            let support = cert(*author, 2, wave_1.clone());
+            gate.action(&support, &committee, delay);
+        }
+        let (_immediate, delayed) = gate.take_decided(&committee, delay);
+        assert_eq!(delayed.len(), 1);
+        assert_eq!(gate.active_hold_leader, Some(1));
+
+        let leader_3 = SupportVisibilityGate::leader_of_round(&committee, 3).unwrap();
+        let leader_3_cert = cert(leader_3, 3, HashSet::new());
+        let wave_3 = HashSet::from([leader_3_cert.header.id.clone(), leader_3_cert.digest()]);
+        gate.action(&leader_3_cert, &committee, delay);
+        for author in &names {
+            let support = cert(*author, 4, wave_3.clone());
+            assert_eq!(
+                gate.action(&support, &committee, delay),
+                VisibilityAction::Park
+            );
+        }
+        let (immediate_next, delayed_next) = gate.take_decided(&committee, delay);
+        assert!(delayed_next.is_empty(), "next wave observation must not be held");
+        assert_eq!(immediate_next.len(), names.len());
     }
 }
