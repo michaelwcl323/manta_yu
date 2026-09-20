@@ -238,6 +238,11 @@ Examples:
     parser.set_defaults(attack_limit_certificates=True)
     parser.add_argument('--attack-regroup-interval-ms', type=int, default=200,
                         help='Attack group rotation interval in milliseconds; 0 disables regrouping')
+    parser.add_argument('--attack-delay-all-certificates', action='store_true',
+                        help='Delay all remote certificates, bypassing groups; headers remain immediate')
+    parser.add_argument('--attack-support-visibility', dest='attack_support_visibility', action='store_true',
+                        help='Hold extra observation-layer support certificates at receivers')
+    parser.set_defaults(attack_support_visibility=False)
     parser.add_argument('--attack-cross-group-delay-ms', type=int, default=500,
                         help='Extra cross-group message delay during attack (milliseconds)')
     
@@ -290,6 +295,8 @@ Examples:
                 'attack_regroup_interval_ms': args.attack_regroup_interval_ms,
                 'attack_limit_headers': args.attack_limit_headers,
                 'attack_limit_certificates': args.attack_limit_certificates,
+                'attack_delay_all_certificates': args.attack_delay_all_certificates,
+                'attack_support_visibility': args.attack_support_visibility,
                 'attack_cross_group_delay_ms': args.attack_cross_group_delay_ms,
             },
         )

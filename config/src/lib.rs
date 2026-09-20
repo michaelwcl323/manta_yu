@@ -287,6 +287,13 @@ pub struct Committee {
     /// Whether to delay cross-group certificate broadcasts and sync replies during the attack.
     #[serde(default = "default_attack_limit_certificates")]
     pub attack_limit_certificates: bool,
+    /// Delay every remote certificate, bypassing grouping; headers remain immediate.
+    #[serde(default)]
+    pub attack_delay_all_certificates: bool,
+    /// Hold extra observation-layer support certificates at the receiver so commit
+    /// checks see at most 3 supporters while coverage can still be met.
+    #[serde(default)]
+    pub attack_support_visibility: bool,
 }
 
 impl Import for Committee {}
@@ -435,6 +442,18 @@ impl Committee {
         ) {
             (Some(a), Some(b)) if a != b => self.attack_cross_group_delay_ms,
             _ => 0,
+        }
+    }
+
+    /// Delivery policy for certificates; callers apply the attack window and switch.
+    pub fn attack_certificate_delay_ms(&self, sender: &PublicKey, recipient: &PublicKey, epoch: u64) -> u64 {
+        if sender == recipient || self.authority_index(sender).is_none() || self.authority_index(recipient).is_none() {
+            return 0;
+        }
+        if self.attack_delay_all_certificates {
+            self.attack_cross_group_delay_ms
+        } else {
+            self.attack_link_delay_at_epoch_ms(sender, recipient, epoch)
         }
     }
 
@@ -806,6 +825,8 @@ mod tests {
             attack_regroup_interval_ms: 0,
             attack_limit_headers: false,
             attack_limit_certificates: true,
+            attack_delay_all_certificates: false,
+            attack_support_visibility: false,
         }
     }
 
@@ -1056,6 +1077,27 @@ mod tests {
             committee.attack_group_epoch(std::time::Duration::from_secs(100)),
             0
         );
+    }
+
+    #[test]
+    fn all_certificate_delay_cannot_be_bypassed_by_local_group_or_regrouping() {
+        let mut committee = attack_committee(10, 4);
+        committee.attack_delay_all_certificates = true;
+        committee.attack_cross_group_delay_ms = 200;
+        let names: Vec<_> = committee.authorities.keys().copied().collect();
+        for kappa in [2, 3] {
+            committee.kappa = kappa;
+            for epoch in 0..10 {
+                for i in 0..10 {
+                    for j in 0..10 {
+                        assert_eq!(committee.attack_certificate_delay_ms(&names[i], &names[j], epoch), if i == j { 0 } else { 200 });
+                    }
+                }
+            }
+        }
+        committee.attack_delay_all_certificates = false;
+        assert_eq!(committee.attack_certificate_delay_ms(&names[0], &names[1], 0), 0);
+        assert_eq!(committee.attack_certificate_delay_ms(&names[0], &names[5], 0), 200);
     }
 
     #[test]

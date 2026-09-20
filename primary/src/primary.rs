@@ -138,6 +138,10 @@ impl Primary {
         // The `SignatureService` is used to require signatures on specific digests.
         let signature_service = SignatureService::new(secret);
 
+        let visibility_gate = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::support_visibility::SupportVisibilityGate::new(),
+        ));
+
         // The `Core` receives and handles headers, votes, and certificates from the other primaries.
         Core::spawn(
             name,
@@ -153,6 +157,7 @@ impl Primary {
             /* rx_proposer */ rx_headers,
             tx_consensus,
             /* tx_proposer */ tx_parents,
+            visibility_gate.clone(),
         );
 
         // Keeps track of the latest consensus round and allows other tasks to clean up their their internal state
@@ -202,7 +207,7 @@ impl Primary {
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.
-        Helper::spawn(name, committee.clone(), store, rx_cert_requests);
+        Helper::spawn(name, committee.clone(), store, rx_cert_requests, visibility_gate);
 
         // NOTE: This log entry is used to compute performance.
         info!(

@@ -3,6 +3,7 @@ use crate::aggregators::{CertificatesAggregator, VotesAggregator};
 use crate::error::{DagError, DagResult};
 use crate::messages::{merge_author_bitmaps, set_author_bit, Certificate, Header, ProposalParents, Vote};
 use crate::primary::{PrimaryMessage, Round};
+use crate::support_visibility::{SupportVisibilityGate, VisibilityAction};
 use crate::synchronizer::Synchronizer;
 use async_recursion::async_recursion;
 use bytes::Bytes;
@@ -13,10 +14,10 @@ use log::{debug, error, info, warn};
 use network::{CancelHandler, ReliableSender};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use store::Store;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 #[cfg(test)]
 #[path = "tests/core_tests.rs"]
@@ -69,6 +70,11 @@ pub struct Core {
     cancel_handlers: HashMap<Round, Vec<CancelHandler>>,
     /// Node-local attack clock.
     boot_instant: Instant,
+    /// Shared receiver-side support-visibility attack.
+    visibility_gate: Arc<Mutex<SupportVisibilityGate>>,
+    /// Releases observation-layer certificates after the visibility hold.
+    rx_visibility_release: Receiver<Certificate>,
+    tx_visibility_release: Sender<Certificate>,
 }
 
 impl Core {
@@ -100,7 +106,8 @@ impl Core {
     }
 
     fn attack_active_for_headers(&self) -> bool {
-        self.committee.attack_limit_headers && self.attack_active_now()
+        !self.committee.attack_delay_all_certificates
+            && self.committee.attack_limit_headers && self.attack_active_now()
     }
 
     fn attack_active_for_certificates(&self) -> bool {
@@ -133,22 +140,24 @@ impl Core {
                 tokio::time::Instant::from_std(boot_instant + Duration::from_secs(committee.attack_start_secs));
             tokio::time::sleep_until(attack_start).await;
             info!(
-                "start attack: headers_limited={} certificates_limited={} \
-                 start_secs={} duration_secs={} group_size={} cross_group_delay_ms={} regroup_interval_ms={} regroup_shift={} kappa={} reference={} coverage={}",
-                committee.attack_limit_headers,
+                "start attack: headers_limited={} certificates_limited={} all_certificates={} \
+                 start_secs={} duration_secs={} group_size={} cross_group_delay_ms={} regroup_interval_ms={} regroup_shift={} support_visibility={} kappa={} reference={} coverage={} leader=round_robin",
+                committee.attack_limit_headers && !committee.attack_delay_all_certificates,
                 committee.attack_limit_certificates,
+                committee.attack_delay_all_certificates,
                 committee.attack_start_secs,
                 committee.attack_duration_secs,
                 committee.attack_group_size,
                 committee.attack_cross_group_delay_ms,
                 committee.attack_regroup_interval_ms,
                 committee.attack_regroup_shift(),
+                committee.attack_support_visibility,
                 committee.kappa,
                 committee.reference,
                 committee.coverage,
             );
 
-            if committee.attack_regroup_interval_ms > 0 {
+            if !committee.attack_delay_all_certificates && committee.attack_regroup_interval_ms > 0 {
                 let mut epoch = 1u64;
                 loop {
                     let offset_ms = epoch.saturating_mul(committee.attack_regroup_interval_ms);
@@ -203,11 +212,13 @@ impl Core {
             .into_iter()
             .map(|(recipient, addresses)| {
                 let delay = if active {
-                    self.committee.attack_link_delay_at_epoch_ms(
-                        &self.name,
-                        &recipient,
-                        epoch,
-                    )
+                    if filter_for_headers {
+                        self.committee.attack_link_delay_at_epoch_ms(&self.name, &recipient, epoch)
+                    } else if self.committee.attack_support_visibility {
+                        0
+                    } else {
+                        self.committee.attack_certificate_delay_ms(&self.name, &recipient, epoch)
+                    }
                 } else {
                     0
                 };
@@ -231,10 +242,12 @@ impl Core {
         rx_proposer: Receiver<Header>,
         tx_consensus: Sender<Certificate>,
         tx_proposer: Sender<(ProposalParents, Round)>,
+        visibility_gate: Arc<Mutex<SupportVisibilityGate>>,
     ) {
         tokio::spawn(async move {
             let boot_instant = Instant::now();
             Self::spawn_attack_log_task(committee.clone(), boot_instant);
+            let (tx_visibility_release, rx_visibility_release) = channel(2_000);
             Self {
                 name,
                 committee,
@@ -258,6 +271,9 @@ impl Core {
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
                 boot_instant,
+                visibility_gate,
+                rx_visibility_release,
+                tx_visibility_release,
             }
             .run()
             .await;
@@ -584,6 +600,53 @@ impl Core {
         let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
         self.store.write(certificate.digest().to_vec(), bytes).await;
 
+        if self.hold_support_visibility(&certificate) {
+            return Ok(());
+        }
+
+        self.deliver_certificate_downstream(certificate).await
+    }
+
+    fn hold_support_visibility(&mut self, certificate: &Certificate) -> bool {
+        if !self.committee.attack_support_visibility || !self.attack_active_for_certificates() {
+            return false;
+        }
+        let delay = Duration::from_millis(self.committee.attack_cross_group_delay_ms);
+        let (action, immediate, delayed) = {
+            let mut gate = self
+                .visibility_gate
+                .lock()
+                .expect("support visibility gate lock");
+            let action = gate.action(certificate, &self.committee, delay);
+            let (immediate, delayed) = gate.take_decided(&self.committee, delay);
+            (action, immediate, delayed)
+        };
+        for cert in immediate {
+            let tx = self.tx_visibility_release.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(cert).await;
+            });
+        }
+        for cert in delayed {
+            let tx = self.tx_visibility_release.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = tx.send(cert).await;
+            });
+        }
+        match action {
+            VisibilityAction::Deliver => {
+                self.visibility_gate
+                    .lock()
+                    .expect("support visibility gate lock")
+                    .mark_delivered(certificate);
+                false
+            }
+            VisibilityAction::Park => true,
+        }
+    }
+
+    async fn deliver_certificate_downstream(&mut self, certificate: Certificate) -> DagResult<()> {
         // Aggregate certificates by their own round instead of a single global current_round.
         // Whichever round reaches the unlock condition first can be dispatched to proposer first.
         let target_round_start = certificate.round();
@@ -790,6 +853,14 @@ impl Core {
                 // We receive here loopback certificates from the `CertificateWaiter`. Those are certificates for which
                 // we interrupted execution (we were missing some of their ancestors) and we are now ready to resume
                 // processing.
+                Some(certificate) = self.rx_visibility_release.recv() => {
+                    self.visibility_gate
+                        .lock()
+                        .expect("support visibility gate lock")
+                        .mark_delivered(&certificate);
+                    self.deliver_certificate_downstream(certificate).await
+                },
+
                 Some(certificate) = self.rx_certificate_waiter.recv() => {
                     let origin = certificate.origin();
                     let origin_node = self

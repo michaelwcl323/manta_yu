@@ -809,7 +809,7 @@ leader_digest(cert)= {:?} -> {:?} (node_id={})",
         pending.seen_support_certificate_digests =
             Self::support_certificate_digests(state, support_round);
         if stake < threshold {
-            debug!(
+            info!(
                 "DAG_COMMIT_CHECK path={} leader_round={} leader_node={} support_round={} support_basis={} trigger_round={} stake={} threshold={} result=insufficient_stake support_set={:?}",
                 path.log_label(),
                 leader_round,

@@ -264,7 +264,7 @@ def cloudlab_wan(ctx, action='setup', settings_file='cloudlab_settings.json'):
 @task
 def cloudlab_remote(
     ctx,
-    debug=True,
+    debug=False,
     sigma=1,
     kappa=2,
     reference=4,
@@ -298,9 +298,11 @@ def cloudlab_remote(
     attack_start_secs=60,
     attack_duration_secs=60,
     attack_group_size=5,
-    attack_regroup_interval_ms=200,
+    attack_regroup_interval_ms=0,
     attack_limit_headers=False,
     attack_limit_certificates=True,
+    attack_delay_all_certificates=False,
+    attack_support_visibility=True,
     attack_cross_group_delay_ms=200,
 
     # 这是payload 的调度，第三轮和第二轮的顶点接收payload，目前以第三轮顶点优先，多余的给第二轮
@@ -321,6 +323,8 @@ def cloudlab_remote(
     attack_enabled = _coerce_bool(attack_enabled)
     attack_limit_headers = _coerce_bool(attack_limit_headers)
     attack_limit_certificates = _coerce_bool(attack_limit_certificates)
+    attack_delay_all_certificates = _coerce_bool(attack_delay_all_certificates)
+    attack_support_visibility = _coerce_bool(attack_support_visibility)
     enable_adaptive_intermediate_spill = _coerce_bool(enable_adaptive_intermediate_spill)
     bench_params = {
         'faults': 0,
@@ -367,6 +371,8 @@ def cloudlab_remote(
         'attack_regroup_interval_ms': int(attack_regroup_interval_ms),
         'attack_limit_headers': attack_limit_headers,
         'attack_limit_certificates': attack_limit_certificates,
+        'attack_delay_all_certificates': attack_delay_all_certificates,
+        'attack_support_visibility': attack_support_visibility,
         'attack_cross_group_delay_ms': int(attack_cross_group_delay_ms),
         'enable_adaptive_intermediate_spill': enable_adaptive_intermediate_spill,
         'adaptive_intermediate_spill_trigger_digests': int(adaptive_intermediate_spill_trigger_digests),

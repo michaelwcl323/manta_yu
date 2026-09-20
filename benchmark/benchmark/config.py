@@ -49,7 +49,7 @@ class Committee:
                  solid_candidate_threshold=0, attack_enabled=False,
                  attack_start_secs=0, attack_duration_secs=0, attack_group_size=0,
                  attack_limit_headers=False,
-                 attack_limit_certificates=True, attack_cross_group_delay_ms=500, attack_regroup_interval_ms=0):
+                 attack_limit_certificates=True, attack_cross_group_delay_ms=500, attack_regroup_interval_ms=0, attack_delay_all_certificates=False, attack_support_visibility=False):
         ''' The `addresses` field looks as follows:
             { 
                 "name": ["host", "host", ...],
@@ -87,6 +87,8 @@ class Committee:
             'attack_regroup_interval_ms': attack_regroup_interval_ms,
             'attack_limit_headers': attack_limit_headers,
             'attack_limit_certificates': attack_limit_certificates,
+            'attack_delay_all_certificates': attack_delay_all_certificates,
+            'attack_support_visibility': attack_support_visibility,
             'attack_cross_group_delay_ms': attack_cross_group_delay_ms,
         }
         for name, hosts in addresses.items():
@@ -186,7 +188,7 @@ class LocalCommittee(Committee):
                  solid_candidate_threshold=0, attack_enabled=False,
                  attack_start_secs=0, attack_duration_secs=0, attack_group_size=0,
                  attack_limit_headers=False,
-                 attack_limit_certificates=True, attack_cross_group_delay_ms=500, attack_regroup_interval_ms=0):
+                 attack_limit_certificates=True, attack_cross_group_delay_ms=500, attack_regroup_interval_ms=0, attack_delay_all_certificates=False, attack_support_visibility=False):
         assert isinstance(names, list)
         assert all(isinstance(x, str) for x in names)
         assert isinstance(port, int)
@@ -213,6 +215,8 @@ class LocalCommittee(Committee):
             attack_limit_certificates,
             attack_cross_group_delay_ms,
             attack_regroup_interval_ms,
+            attack_delay_all_certificates,
+            attack_support_visibility,
         )
 
 
@@ -238,6 +242,8 @@ class NodeParameters:
             'attack_enabled',
             'attack_limit_headers',
             'attack_limit_certificates',
+            'attack_delay_all_certificates',
+            'attack_support_visibility',
         ]
         for field in optional_bool_fields:
             if field in json and not isinstance(json[field], bool):

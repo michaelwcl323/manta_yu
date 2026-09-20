@@ -1034,6 +1034,8 @@ class CloudLabBench:
             attack_limit_headers,
             attack_limit_certificates,
             attack_regroup_interval_ms=node_parameters.json.get('attack_regroup_interval_ms', 0),
+            attack_delay_all_certificates=node_parameters.json.get('attack_delay_all_certificates', False),
+            attack_support_visibility=node_parameters.json.get('attack_support_visibility', False),
             attack_cross_group_delay_ms=node_parameters.json.get(
                 'attack_cross_group_delay_ms', 500),
         )
@@ -1671,6 +1673,8 @@ SCRIPTEOF'''
                                             'attack_regroup_interval_ms',
                                             'attack_limit_headers',
                                             'attack_limit_certificates',
+                                            'attack_delay_all_certificates',
+                                            'attack_support_visibility',
                                             'attack_cross_group_delay_ms',
                                             'enable_adaptive_intermediate_spill',
                                             'adaptive_intermediate_spill_trigger_digests',

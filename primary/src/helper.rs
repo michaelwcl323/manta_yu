@@ -1,10 +1,13 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+use crate::messages::Certificate;
 use crate::primary::PrimaryMessage;
+use crate::support_visibility::SupportVisibilityGate;
 use bytes::Bytes;
 use config::Committee;
 use crypto::{Digest, PublicKey};
 use log::{error, warn};
 use network::SimpleSender;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use store::Store;
 use tokio::sync::mpsc::Receiver;
@@ -23,6 +26,8 @@ pub struct Helper {
     network: SimpleSender,
     /// Node-local attack clock.
     boot_instant: Instant,
+    /// Shared with Core so sync replies use the same withheld-support set.
+    visibility_gate: Arc<Mutex<SupportVisibilityGate>>,
 }
 
 impl Helper {
@@ -31,6 +36,7 @@ impl Helper {
         committee: Committee,
         store: Store,
         rx_primaries: Receiver<(Vec<Digest>, PublicKey)>,
+        visibility_gate: Arc<Mutex<SupportVisibilityGate>>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -40,6 +46,7 @@ impl Helper {
                 rx_primaries,
                 network: SimpleSender::new(),
                 boot_instant: Instant::now(),
+                visibility_gate,
             }
             .run()
             .await;
@@ -62,6 +69,28 @@ impl Helper {
         elapsed < start + Duration::from_secs(duration_secs)
     }
 
+    fn reply_delay_ms(&self, certificate: &Certificate, origin: &PublicKey) -> u64 {
+        if !self.attack_active() {
+            return 0;
+        }
+        if self.committee.attack_support_visibility {
+            return self
+                .visibility_gate
+                .lock()
+                .expect("support visibility gate lock")
+                .sync_delay_ms(
+                    certificate,
+                    &self.committee,
+                    self.committee.attack_cross_group_delay_ms,
+                );
+        }
+        self.committee.attack_certificate_delay_ms(
+            &self.name,
+            origin,
+            self.committee.attack_group_epoch(self.boot_instant.elapsed()),
+        )
+    }
+
     async fn run(&mut self) {
         while let Some((digests, origin)) = self.rx_primaries.recv().await {
             // TODO [issue #195]: Do some accounting to prevent bad nodes from monopolizing our resources.
@@ -75,16 +104,6 @@ impl Helper {
                 }
             };
 
-            let delay_ms = if self.attack_active() {
-                self.committee.attack_link_delay_at_epoch_ms(
-                    &self.name,
-                    &origin,
-                    self.committee.attack_group_epoch(self.boot_instant.elapsed()),
-                )
-            } else {
-                0
-            };
-
             // Reply to the request (the best we can).
             for digest in digests {
                 match self.store.read(digest.to_vec()).await {
@@ -92,6 +111,7 @@ impl Helper {
                         // TODO: Remove this deserialization-serialization in the critical path.
                         let certificate = bincode::deserialize(&data)
                             .expect("Failed to deserialize our own certificate");
+                        let delay_ms = self.reply_delay_ms(&certificate, &origin);
                         let bytes = bincode::serialize(&PrimaryMessage::Certificate(certificate))
                             .expect("Failed to serialize our own certificate");
                         self.network

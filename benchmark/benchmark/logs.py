@@ -66,6 +66,12 @@ class LogParser:
         proposals, commits, self.configs, primary_ips = zip(*results)
         self.proposals = self._merge_results([x.items() for x in proposals])
         self.commits = self._merge_results([x.items() for x in commits])
+        self.insufficient_stake = sum(
+            log.count('result=insufficient_stake') for log in primaries
+        )
+        self.support_visibility_holds = sum(
+            log.count('SUPPORT_VISIBILITY hold') for log in primaries
+        )
 
         # Parse the workers logs.
         try:
@@ -287,6 +293,8 @@ class LogParser:
             ('Attack regroup interval ms', 'attack_regroup_interval_ms'),
             ('Attack limit headers', 'attack_limit_headers'),
             ('Attack limit certificates', 'attack_limit_certificates'),
+            ('Attack delay all certificates', 'attack_delay_all_certificates'),
+            ('Attack support visibility', 'attack_support_visibility'),
             ('Attack cross-group delay ms', 'attack_cross_group_delay_ms'),
             ('Enable adaptive intermediate spill', 'enable_adaptive_intermediate_spill'),
             (
@@ -359,6 +367,8 @@ class LogParser:
             f' Consensus TPS: {round(consensus_tps):,} tx/s\n'
             f' Consensus BPS: {round(consensus_bps):,} B/s\n'
             f' Consensus latency: {round(consensus_latency):,} ms\n'
+            f' Insufficient-stake commit checks: {self.insufficient_stake}\n'
+            f' Support-visibility holds: {self.support_visibility_holds}\n'
             '\n'
             f' End-to-end TPS: {round(end_to_end_tps):,} tx/s\n'
             f' End-to-end BPS: {round(end_to_end_bps):,} B/s\n'
