@@ -27,6 +27,7 @@ pub struct Helper {
     /// Node-local attack clock.
     boot_instant: Instant,
     /// Shared with Core so sync replies use the same withheld-support set.
+    #[allow(dead_code)]
     visibility_gate: Arc<Mutex<SupportVisibilityGate>>,
 }
 
@@ -69,20 +70,13 @@ impl Helper {
         elapsed < start + Duration::from_secs(duration_secs)
     }
 
-    fn reply_delay_ms(&self, certificate: &Certificate, origin: &PublicKey) -> u64 {
+    fn reply_delay_ms(&self, _certificate: &Certificate, origin: &PublicKey) -> u64 {
         if !self.attack_active() {
             return 0;
         }
         if self.committee.attack_support_visibility {
-            return self
-                .visibility_gate
-                .lock()
-                .expect("support visibility gate lock")
-                .sync_delay_ms(
-                    certificate,
-                    &self.committee,
-                    self.committee.attack_cross_group_delay_ms,
-                );
+            // Coverage/proposer must still see extras; only consensus is held.
+            return 0;
         }
         self.committee.attack_certificate_delay_ms(
             &self.name,

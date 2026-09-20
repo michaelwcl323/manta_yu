@@ -10,20 +10,21 @@ use std::time::Duration;
 
 const MAX_IMMEDIATE_SUPPORT: usize = 3;
 const MIN_GENERATED_SUPPORT: usize = 4;
+#[allow(dead_code)]
 const MAX_GENERATED_SUPPORT: usize = 6;
 
 /// Receiver-side visibility attack against one wave leader at a time.
 ///
 /// Observation-layer support certificates:
-/// - the 3 lowest-index *known* supporters are delivered immediately so coverage
-///   can advance and commit checks see at most those 3;
-/// - further supporters are parked until the generated count is known;
-/// - 4..=6 generated supporters: extras stay held for `delay`;
-/// - otherwise extras are released immediately.
+/// - Core still forwards every certificate to the proposer, so coverage=7 and
+///   coverage=10 keep the same DAG pace;
+/// - consensus sees at most the 3 lowest-index supporters until `delay`;
+/// - once at least 4 supporters exist, extras stay held for `delay` even if
+///   generated support later exceeds 6 or reaches coverage.
 ///
-/// Next-layer certificates are never held. Extras stay delayed for `delay`
-/// even after the next layer inherits support, so the κ=2 check misses them
-/// and they arrive in time for the extra κ=3 layer.
+/// Next-layer certificates are never held. Kappa=2's wave-start check looks at
+/// the observation layer and misses the extras; kappa=3's check looks at the
+/// extra layer, which is not held.
 #[derive(Clone, Debug)]
 pub struct SupportVisibilityGate {
     layers: HashMap<Round, LayerView>,
@@ -227,27 +228,11 @@ impl SupportVisibilityGate {
         let mut immediate = Vec::new();
         let mut delayed = Vec::new();
         for layer in self.layers.values_mut() {
-            if layer.stopped {
-                for (author, cert) in layer.deferred.drain() {
-                    if !layer.delay_armed.contains(&author) {
-                        immediate.push(cert);
-                    }
-                }
-                continue;
-            }
             let supporters = Self::generated_supporters(layer);
             let generated = supporters.len();
             let layer_size = layer.arrived.len();
-            if generated >= committee.coverage || generated > MAX_GENERATED_SUPPORT {
-                for (author, cert) in layer.deferred.drain() {
-                    if !layer.delay_armed.contains(&author) {
-                        immediate.push(cert);
-                    }
-                }
-                continue;
-            }
             if generated < MIN_GENERATED_SUPPORT {
-                if layer_size >= committee.size() || layer_size >= committee.coverage {
+                if layer_size >= committee.size() {
                     for (author, cert) in layer.deferred.drain() {
                         if !layer.delay_armed.contains(&author) {
                             immediate.push(cert);
@@ -256,6 +241,7 @@ impl SupportVisibilityGate {
                 }
                 continue;
             }
+
             let delay_armed = layer.delay_armed.clone();
             let mut extras = Vec::new();
             layer.deferred.retain(|author, cert| {
@@ -289,6 +275,7 @@ impl SupportVisibilityGate {
         (immediate, delayed)
     }
 
+    #[allow(dead_code)]
     pub fn sync_delay_ms(&self, certificate: &Certificate, committee: &Committee, delay_ms: u64) -> u64 {
         if !committee.attack_support_visibility || delay_ms == 0 {
             return 0;

@@ -600,11 +600,13 @@ impl Core {
         let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
         self.store.write(certificate.digest().to_vec(), bytes).await;
 
-        if self.hold_support_visibility(&certificate) {
+        let hold_from_consensus = self.hold_support_visibility(&certificate);
+        self.deliver_to_proposer(&certificate).await?;
+        if hold_from_consensus {
             return Ok(());
         }
 
-        self.deliver_certificate_downstream(certificate).await
+        self.deliver_to_consensus(certificate).await
     }
 
     fn hold_support_visibility(&mut self, certificate: &Certificate) -> bool {
@@ -653,9 +655,7 @@ impl Core {
         }
     }
 
-    async fn deliver_certificate_downstream(&mut self, certificate: Certificate) -> DagResult<()> {
-        // Aggregate certificates by their own round instead of a single global current_round.
-        // Whichever round reaches the unlock condition first can be dispatched to proposer first.
+    async fn deliver_to_proposer(&mut self, certificate: &Certificate) -> DagResult<()> {
         let target_round_start = certificate.round();
         let target_round_end = target_round_start + self.committee.solid_wave_length();
         for target_round in target_round_start..target_round_end {
@@ -665,46 +665,16 @@ impl Core {
                 .or_insert_with(|| Box::new(CertificatesAggregator::new(target_round)))
                 .append(certificate.clone(), &self.committee)?
             {
-                // Send it to the `Proposer`.
                 self.tx_proposer
                     .send((parents, target_round))
                     .await
                     .expect("Failed to send certificate");
             }
         }
+        Ok(())
+    }
 
-        // Debug: resolve each solid_step_vertex in the merge to [round, node_id].
-        // let current_round = target_round + 1;
-        // if current_round % self.committee.solid_step_length() == 0 && current_round > 1 {
-        //     if let Some(agg) = self.certificates_aggregators.get(&target_round) {
-        //         if let Some(digests) = agg.last_solid_step_union_digests() {
-        //             let mut vertices = Vec::with_capacity(digests.len());
-        //             for digest in digests {
-        //                 if let Ok(Some(bytes)) = self.store.read(digest.to_vec()).await {
-        //                     if let Ok(cert) = bincode::deserialize::<Certificate>(&bytes) {
-        //                         let node_id = self.node_index(&cert.origin()).unwrap_or(999);
-        //                         vertices.push(format!("[{},{}]", cert.round(), node_id));
-        //                         debug!(
-        //                             "solid_step_vertex {} -> [{},{}]",
-        //                             digest,
-        //                             cert.round(),
-        //                             node_id
-        //                         );
-        //                     }
-        //                 }
-        //             }
-        //             if !vertices.is_empty() {
-        //                 debug!(
-        //                     "solid_step_union (round {}): {}",
-        //                     current_round,
-        //                     vertices.join(", ")
-        //                 );
-        //             }
-        //         }
-        //     }
-        // }
-
-        // Send it to the consensus layer.
+    async fn deliver_to_consensus(&mut self, certificate: Certificate) -> DagResult<()> {
         let id = certificate.header.id.clone();
         let origin = certificate.origin();
         let origin_node = self
@@ -865,7 +835,7 @@ impl Core {
                         .lock()
                         .expect("support visibility gate lock")
                         .mark_delivered(&certificate);
-                    self.deliver_certificate_downstream(certificate).await
+                    self.deliver_to_consensus(certificate).await
                 },
 
                 Some(certificate) = self.rx_certificate_waiter.recv() => {
