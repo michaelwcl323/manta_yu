@@ -734,6 +734,13 @@ class CloudLabBench:
             'if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi; export PATH="$HOME/.cargo/bin:$PATH"',
             'command -v rustup >/dev/null 2>&1 || (echo "rustup not found after setup" && exit 1)',
             'command -v cargo >/dev/null 2>&1 || (echo "cargo not found after setup" && exit 1)',
+            # Recover an interrupted/corrupt stable toolchain (missing manifest or librustc_driver).
+            'if ! rustc -vV >/dev/null 2>&1 || ! cargo -vV >/dev/null 2>&1; then '
+            'echo "Broken rust toolchain detected; reinstalling stable"; '
+            'rustup toolchain uninstall stable || true; '
+            'rm -rf "$HOME/.rustup/toolchains/stable-x86_64-unknown-linux-gnu"; '
+            'rustup toolchain install stable --force; '
+            'fi',
             'rustup toolchain install stable',
             'rustup default stable',
             'rustup component add cargo rustc rust-std || true',
@@ -770,7 +777,8 @@ class CloudLabBench:
                 key = (username, port)
                 if key not in hosts_by_config:
                     hosts_by_config[key] = []
-                hosts_by_config[key].append(hostname)
+                if hostname not in hosts_by_config[key]:
+                    hosts_by_config[key].append(hostname)
             
             # Run commands on each group
             for (username, port), hostnames in hosts_by_config.items():
@@ -1066,6 +1074,14 @@ class CloudLabBench:
             'attack_limit_certificates',
             True,
         )
+        authority_base_ports = [
+            int(host['base_port'])
+            for host in hosts
+            if host.get('base_port') is not None
+        ]
+        if len(authority_base_ports) != len(hosts):
+            authority_base_ports = None
+
         committee = Committee(
             addresses,
             self.settings.base_port,
@@ -1085,6 +1101,7 @@ class CloudLabBench:
             attack_group_size,
             attack_limit_headers,
             attack_limit_certificates,
+            authority_base_ports=authority_base_ports,
         )
         committee.print(PathMaker.committee_file())
         

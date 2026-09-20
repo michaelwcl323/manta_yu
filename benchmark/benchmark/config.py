@@ -49,7 +49,8 @@ class Committee:
                  solid_candidate_threshold=0, attack_enabled=False,
                  attack_start_secs=0, attack_duration_secs=0, attack_group_size=0,
                  attack_limit_headers=False,
-                 attack_limit_certificates=True):
+                 attack_limit_certificates=True,
+                 authority_base_ports=None):
         ''' The `addresses` field looks as follows:
             { 
                 "name": ["host", "host", ...],
@@ -66,6 +67,9 @@ class Committee:
         )
         assert len({len(x) for x in addresses.values()}) == 1
         assert isinstance(base_port, int) and base_port > 1024
+        if authority_base_ports is not None:
+            assert len(authority_base_ports) == len(addresses)
+            assert all(isinstance(p, int) and p > 1024 for p in authority_base_ports)
 
         port = base_port
         self.json = {
@@ -87,7 +91,9 @@ class Committee:
             'attack_limit_headers': attack_limit_headers,
             'attack_limit_certificates': attack_limit_certificates,
         }
-        for name, hosts in addresses.items():
+        for i, (name, hosts) in enumerate(addresses.items()):
+            if authority_base_ports is not None:
+                port = authority_base_ports[i]
             host = hosts.pop(0)
             primary_addr = {
                 'primary_to_primary': f'{host}:{port}',
