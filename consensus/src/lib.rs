@@ -276,9 +276,12 @@ impl Consensus {
             if let Some(newest_leader_round) =
                 candidates.iter().map(|candidate| candidate.leader_round).max()
             {
+                let keep_failed_for_recheck = self.committee.attack_support_visibility
+                    && self.committee.enable_commit_recheck;
                 let mut retired = Vec::new();
                 pending_commit_checks.retain(|pending| {
-                    let keep = pending.leader_round >= newest_leader_round;
+                    let keep = pending.leader_round >= newest_leader_round
+                        || keep_failed_for_recheck;
                     if !keep {
                         retired.push((pending.path, pending.leader_round, pending.support_round));
                     }
@@ -978,6 +981,40 @@ leader_digest(cert)= {:?} -> {:?} (node_id={})",
         dag.get(&round).map(|x| x.get(&leader)).flatten()
     }
 
+    fn previous_leader_still_has_support(&self, leader: &Certificate, state: &State) -> bool {
+        if !self.committee.attack_support_visibility {
+            return true;
+        }
+        let leader_round = leader.round();
+        let wave = self.committee.solid_wave_length();
+        let Some(support_round) = self
+            .committee
+            .last_solid_step_round_in_closed_range(leader_round, leader_round.saturating_add(wave).saturating_sub(1))
+        else {
+            return false;
+        };
+        let Some(support_round_map) = state.dag.get(&support_round) else {
+            return false;
+        };
+        let leader_header_id = leader.header.id.clone();
+        let leader_digest = leader.digest();
+        let stake: Stake = support_round_map
+            .values()
+            .filter_map(|(_, certificate)| {
+                let (supports, _, _) = self.certificate_supports_leader(
+                    CommitCheckPath::Solid,
+                    certificate,
+                    &leader_header_id,
+                    &leader_digest,
+                    leader,
+                    state,
+                );
+                supports.then(|| self.committee.stake(&certificate.origin()))
+            })
+            .sum();
+        stake >= self.committee.validity_threshold()
+    }
+
     /// Order leader certificates to commit, stepping backwards across solid-wave
     /// boundary rounds (1, 1+wave, 1+2*wave, ...).
     fn order_leaders(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
@@ -1007,7 +1044,9 @@ leader_digest(cert)= {:?} -> {:?} (node_id={})",
                     continue;
                 }
             };
-            if self.linked(cur, prev_leader, state) {
+            if self.linked(cur, prev_leader, state)
+                && self.previous_leader_still_has_support(prev_leader, state)
+            {
                 to_commit.push(prev_leader.clone());
                 cur = prev_leader;
             }

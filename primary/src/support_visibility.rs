@@ -21,8 +21,9 @@ const MAX_GENERATED_SUPPORT: usize = 6;
 /// - 4..=6 generated supporters: extras stay held for `delay`;
 /// - otherwise extras are released immediately.
 ///
-/// Next-layer certificates are never held. When that layer shows `coverage`
-/// distinct supporters, the candidate is released.
+/// Next-layer certificates are never held. Extras stay delayed for `delay`
+/// even after the next layer inherits support, so the κ=2 check misses them
+/// and they arrive in time for the extra κ=3 layer.
 #[derive(Clone, Debug)]
 pub struct SupportVisibilityGate {
     layers: HashMap<Round, LayerView>,
@@ -144,16 +145,12 @@ impl SupportVisibilityGate {
                 {
                     if Self::certificate_supports(certificate, &header_id, &digest) {
                         layer.next_layer_supporters.insert(certificate.origin());
-                        if layer.next_layer_supporters.len() >= committee.coverage {
-                            if !layer.stopped {
-                                info!(
-                                    "SUPPORT_VISIBILITY stop candidate leader_round={} next_layer_supporters={} coverage={}",
-                                    leader_round,
-                                    layer.next_layer_supporters.len(),
-                                    committee.coverage
-                                );
-                            }
-                            layer.stopped = true;
+                        if layer.next_layer_supporters.len() == committee.coverage {
+                            info!(
+                                "SUPPORT_VISIBILITY next layer inherited leader_round={} next_layer_supporters={} extras still delayed",
+                                leader_round,
+                                layer.next_layer_supporters.len()
+                            );
                         }
                     }
                 }
