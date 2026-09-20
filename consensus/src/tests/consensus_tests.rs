@@ -49,6 +49,8 @@ pub fn mock_committee() -> Committee {
         attack_group_size: 0,
         attack_limit_headers: false,
         attack_limit_certificates: true,
+        leader_selection: config::LeaderSelectionMode::Round,
+        leader_offset: 1,
     }
 }
 

@@ -264,7 +264,7 @@ def cloudlab_wan(ctx, action='setup', settings_file='cloudlab_settings.json'):
 @task
 def cloudlab_remote(
     ctx,
-    debug=False,
+    debug=True,
     sigma=1,
     kappa=2,
     reference=7,
@@ -301,13 +301,19 @@ def cloudlab_remote(
     attack_limit_headers=False,
     attack_limit_certificates=True,
 
+    # Leader rotation: wave-index (document) vs legacy raw-round modulo.
+    leader_selection='wave',
+    leader_offset=1,
+    reuse_identity=True,
+    identity_dir='experiment_identity_wave',
+
     # 这是payload 的调度，第三轮和第二轮的顶点接收payload，目前以第三轮顶点优先，多余的给第二轮
     enable_adaptive_intermediate_spill=False, # payload shceduling
     adaptive_intermediate_spill_trigger_digests=2,
     adaptive_intermediate_spill_cap_digests=1,
 
     #会根据这些tag会自动生成目录，将运行结果分类 目录是 design_tag/network_tag/load_tag/
-    design_tag='experiment2_attack_final',
+    design_tag='experiment2_debug_wave',
     network_tag='geo',
     load_tag='balanced_50_500000_50',
 ):
@@ -320,18 +326,23 @@ def cloudlab_remote(
     attack_limit_headers = _coerce_bool(attack_limit_headers)
     attack_limit_certificates = _coerce_bool(attack_limit_certificates)
     enable_adaptive_intermediate_spill = _coerce_bool(enable_adaptive_intermediate_spill)
+    reuse_identity = _coerce_bool(reuse_identity)
+    leader_selection = str(leader_selection).strip().lower()
+    if leader_selection not in ('round', 'wave'):
+        Print.error('leader_selection: use round or wave')
+        return
     bench_params = {
         'faults': 0,
         'nodes': [10],
         'workers': 1,
         'collocate': True,
         'rate_type': 'balanced',
-        'rate': [100000],
+        'rate': [40000],
         # 'rate': [40000,60000],
         # 'rate': [40000,80000,100000,120000,140000,150000,160000,180000],
         # 'rate': [130000],
         'tx_size': 512,
-        'duration': 20,
+        'duration': 120,
         'runs': 1,       
     }
 
@@ -364,6 +375,10 @@ def cloudlab_remote(
         'attack_group_size': int(attack_group_size),
         'attack_limit_headers': attack_limit_headers,
         'attack_limit_certificates': attack_limit_certificates,
+        'leader_selection': leader_selection,
+        'leader_offset': int(leader_offset),
+        'reuse_identity': reuse_identity,
+        'identity_dir': identity_dir,
         'enable_adaptive_intermediate_spill': enable_adaptive_intermediate_spill,
         'adaptive_intermediate_spill_trigger_digests': int(adaptive_intermediate_spill_trigger_digests),
         'adaptive_intermediate_spill_cap_digests': int(adaptive_intermediate_spill_cap_digests),

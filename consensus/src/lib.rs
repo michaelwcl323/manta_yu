@@ -966,15 +966,27 @@ leader_digest(cert)= {:?} -> {:?} (node_id={})",
         // TODO: We should elect the leader of round r-2 using the common coin revealed at round r.
         // At this stage, we are guaranteed to have 2f+1 certificates from round r (which is enough to
         // compute the coin). We currently just use round-robin.
+
+        // Existing fixtures place the round-1 leader under authorities[0]. Keep that
+        // override in unit tests; production uses the committee's pure selection rule.
         #[cfg(test)]
-        let coin = 0;
+        let leader = {
+            let _ = round;
+            *self.authorities.first()?
+        };
         #[cfg(not(test))]
-        let coin = round;
+        let leader = {
+            let index = self.committee.leader_author_index(round)?;
+            debug!(
+                "Leader election: round={} mode={:?} offset={} index={}",
+                round,
+                self.committee.leader_selection,
+                self.committee.leader_offset,
+                index
+            );
+            *self.authorities.get(index)?
+        };
 
-        // Elect the leader.
-        let leader = self.authorities[coin as usize % self.authorities.len()];
-
-        // Return its certificate and the certificate's digest.
         dag.get(&round).map(|x| x.get(&leader)).flatten()
     }
 

@@ -66,6 +66,31 @@ fn default_adaptive_intermediate_spill_cap_digests() -> usize {
     1
 }
 
+fn default_leader_selection() -> LeaderSelectionMode {
+    LeaderSelectionMode::Round
+}
+
+fn default_leader_offset() -> usize {
+    1
+}
+
+/// How the consensus module elects the leader of a wave-start round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaderSelectionMode {
+    /// Legacy: `leader_index = leader_round % n`.
+    Round,
+    /// `leader_index = (wave_index + offset) % n`, with
+    /// `wave_index = (leader_round - 1) / (sigma * kappa)`.
+    Wave,
+}
+
+impl Default for LeaderSelectionMode {
+    fn default() -> Self {
+        Self::Round
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum ConfigError {
     #[error("Node {0} is not in the committee")]
@@ -277,6 +302,13 @@ pub struct Committee {
     /// Whether to limit certificate broadcasts and sync replies once the attack starts.
     #[serde(default = "default_attack_limit_certificates")]
     pub attack_limit_certificates: bool,
+    /// Leader rotation rule. `wave` makes k2 and k3 cover the same authors.
+    #[serde(default = "default_leader_selection")]
+    pub leader_selection: LeaderSelectionMode,
+    /// Added to the wave index before taking modulo n. Default 1 keeps the
+    /// first wave on author index 1, matching the legacy first-round choice.
+    #[serde(default = "default_leader_offset")]
+    pub leader_offset: usize,
 }
 
 impl Import for Committee {}
@@ -656,6 +688,52 @@ impl Committee {
             1 + ((round - 1) / self.solid_wave_length()) * self.solid_wave_length()
         }
     }
+
+    /// Deterministic leader author index for `leader_round`.
+    ///
+    /// Returns `None` for genesis (round 0), an empty committee, a zero wave
+    /// length in wave mode, or a round that is not a wave-start round in wave
+    /// mode. The result depends only on committee parameters and `leader_round`.
+    pub fn leader_author_index(&self, leader_round: u64) -> Option<usize> {
+        Self::compute_leader_author_index(
+            leader_round,
+            self.size(),
+            self.solid_wave_length(),
+            self.leader_selection,
+            self.leader_offset,
+        )
+    }
+
+    pub fn compute_leader_author_index(
+        leader_round: u64,
+        n: usize,
+        wave_length: u64,
+        mode: LeaderSelectionMode,
+        offset: usize,
+    ) -> Option<usize> {
+        if n == 0 || leader_round < 1 {
+            return None;
+        }
+        match mode {
+            LeaderSelectionMode::Round => Some((leader_round as usize) % n),
+            LeaderSelectionMode::Wave => {
+                if wave_length == 0 {
+                    return None;
+                }
+                if (leader_round - 1) % wave_length != 0 {
+                    return None;
+                }
+                let wave_index = ((leader_round - 1) / wave_length) as usize;
+                Some((wave_index + offset) % n)
+            }
+        }
+    }
+
+    /// Public key of the designated leader for `leader_round`, if any.
+    pub fn leader_public_key(&self, leader_round: u64) -> Option<PublicKey> {
+        let index = self.leader_author_index(leader_round)?;
+        self.authorities.keys().nth(index).copied()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -684,7 +762,7 @@ impl Default for KeyPair {
 
 #[cfg(test)]
 mod tests {
-    use super::{Authority, Committee, PrimaryAddresses};
+    use super::{Authority, Committee, LeaderSelectionMode, PrimaryAddresses};
     use crate::generate_production_keypair;
     use std::collections::{BTreeMap, HashMap};
 
@@ -707,6 +785,8 @@ mod tests {
             attack_group_size: 0,
             attack_limit_headers: false,
             attack_limit_certificates: true,
+            leader_selection: LeaderSelectionMode::Round,
+            leader_offset: 1,
         }
     }
 
@@ -901,5 +981,129 @@ mod tests {
             &authorities[5],
             &recipient
         ));
+    }
+
+    fn wave_leader_index(leader_round: u64, wave_length: u64) -> usize {
+        Committee::compute_leader_author_index(
+            leader_round,
+            10,
+            wave_length,
+            LeaderSelectionMode::Wave,
+            1,
+        )
+        .expect("wave-start round should elect a leader")
+    }
+
+    #[test]
+    fn wave_leader_covers_every_author_twice_in_twenty_waves_for_k2_and_k3() {
+        for wave_length in [2_u64, 3_u64] {
+            let mut counts = [0_usize; 10];
+            for wave_index in 0..20 {
+                let leader_round = 1 + wave_index * wave_length;
+                let index = wave_leader_index(leader_round, wave_length);
+                assert_eq!(index, (wave_index as usize + 1) % 10);
+                counts[index] += 1;
+                assert_eq!(
+                    Committee::compute_leader_author_index(
+                        leader_round,
+                        10,
+                        wave_length,
+                        LeaderSelectionMode::Wave,
+                        1,
+                    ),
+                    Some(index),
+                    "repeated lookup must stay deterministic"
+                );
+            }
+            assert!(counts.iter().all(|count| *count == 2));
+        }
+    }
+
+    #[test]
+    fn wave_leader_rejects_genesis_and_non_wave_start_rounds() {
+        assert_eq!(
+            Committee::compute_leader_author_index(
+                0,
+                10,
+                2,
+                LeaderSelectionMode::Wave,
+                1,
+            ),
+            None
+        );
+        assert_eq!(
+            Committee::compute_leader_author_index(
+                2,
+                10,
+                2,
+                LeaderSelectionMode::Wave,
+                1,
+            ),
+            None
+        );
+        assert_eq!(
+            Committee::compute_leader_author_index(
+                2,
+                10,
+                3,
+                LeaderSelectionMode::Wave,
+                1,
+            ),
+            None
+        );
+        assert_eq!(
+            Committee::compute_leader_author_index(
+                1,
+                10,
+                0,
+                LeaderSelectionMode::Wave,
+                1,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn wave_leader_offset_and_non_default_sigma_are_applied() {
+        assert_eq!(
+            Committee::compute_leader_author_index(
+                1,
+                10,
+                4,
+                LeaderSelectionMode::Wave,
+                0,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            Committee::compute_leader_author_index(
+                5,
+                10,
+                4,
+                LeaderSelectionMode::Wave,
+                0,
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            Committee::compute_leader_author_index(
+                1,
+                10,
+                2,
+                LeaderSelectionMode::Round,
+                1,
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            Committee::compute_leader_author_index(
+                3,
+                10,
+                2,
+                LeaderSelectionMode::Round,
+                1,
+            ),
+            Some(3)
+        );
     }
 }

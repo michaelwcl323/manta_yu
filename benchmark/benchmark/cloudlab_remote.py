@@ -8,6 +8,8 @@ This module provides functionality to run benchmarks on CloudLab nodes.
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import json
+import shutil
 from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
 from paramiko import RSAKey
@@ -794,7 +796,57 @@ class CloudLabBench:
         except (GroupException, ExecutionError) as e:
             e = FabricError(e) if isinstance(e, GroupException) else e
             raise BenchError('Failed to update nodes', e)
-    
+
+    def _identity_dir_path(self, node_parameters):
+        identity_dir = node_parameters.json.get('identity_dir')
+        if not identity_dir:
+            return None
+        return Path(identity_dir)
+
+    def _restore_identity_keys(self, identity_dir, key_files):
+        stored = [identity_dir / f'node-{i}.json' for i in range(len(key_files))]
+        if not stored or not all(path.is_file() for path in stored):
+            return False
+        for src, dest in zip(stored, key_files):
+            shutil.copy2(src, dest)
+        return True
+
+    def _persist_identity_keys(self, identity_dir, key_files):
+        identity_dir.mkdir(parents=True, exist_ok=True)
+        for i, src in enumerate(key_files):
+            shutil.copy2(src, identity_dir / f'node-{i}.json')
+
+    def _write_identity_map(self, identity_dir, keys, hosts, committee):
+        identity_dir.mkdir(parents=True, exist_ok=True)
+        generation_order = []
+        for i, (key, host) in enumerate(zip(keys, hosts)):
+            generation_order.append({
+                'generation_index': i,
+                'name': key.name,
+                'hostname': host.get('hostname'),
+                'base_port': host.get('base_port'),
+                'description': host.get('description'),
+            })
+        committee_order = []
+        for index, row in enumerate(sorted(generation_order, key=lambda item: item['name'])):
+            mapped = dict(row)
+            mapped['committee_index'] = index
+            committee_order.append(mapped)
+        mapping = {
+            'leader_selection': committee.json.get('leader_selection'),
+            'leader_offset': committee.json.get('leader_offset'),
+            'sigma': committee.json.get('sigma'),
+            'kappa': committee.json.get('kappa'),
+            'coverage': committee.json.get('coverage'),
+            'generation_order': generation_order,
+            'committee_order': committee_order,
+        }
+        map_path = identity_dir / 'identity_map.json'
+        with open(map_path, 'w') as handle:
+            json.dump(mapping, handle, indent=2)
+            handle.write('\n')
+        return mapping
+
     def _config(self, hosts, node_parameters, bench_parameters):
         """Generate and upload configuration files"""
         Print.info('Generating configuration files...')
@@ -807,6 +859,14 @@ class CloudLabBench:
         keys = []
         key_files = [PathMaker.key_file(i) for i in range(len(hosts))]
         local_compilation_success = False
+        identity_dir = self._identity_dir_path(node_parameters)
+        reuse_identity = bool(node_parameters.json.get('reuse_identity', False))
+        restored_keys = False
+        if reuse_identity and identity_dir is not None:
+            restored_keys = self._restore_identity_keys(identity_dir, key_files)
+            if restored_keys:
+                Print.info(f'Reusing {len(key_files)} committee keys from {identity_dir}')
+                keys = [Key.from_file(filename) for filename in key_files]
         
         # Check if node binary exists before attempting local compilation
         # PathMaker paths are relative to benchmark/ directory (not benchmark/benchmark/)
@@ -856,7 +916,9 @@ class CloudLabBench:
                 node_exists = True
                 break
         
-        if not node_exists:
+        if restored_keys:
+            local_compilation_success = True
+        elif not node_exists:
             Print.info('Node binary not found locally, will generate keys on remote nodes...')
         else:
             try:
@@ -982,6 +1044,10 @@ class CloudLabBench:
                 f'Please ensure either: (1) node binary exists locally, or (2) remote nodes have compiled code.'
             )
             raise BenchError(error_msg, RuntimeError(error_msg))
+
+        if reuse_identity and identity_dir is not None and not restored_keys:
+            self._persist_identity_keys(identity_dir, key_files)
+            Print.info(f'Saved committee keys to {identity_dir} for paired reruns')
         
         # Create addresses dict for Committee
         # Format: {name: [primary_host, worker1_host, worker2_host, ...]}
@@ -1074,6 +1140,12 @@ class CloudLabBench:
             'attack_limit_certificates',
             True,
         )
+        leader_selection = str(
+            node_parameters.json.get('leader_selection', 'round')
+        ).strip().lower()
+        if leader_selection not in ('round', 'wave'):
+            leader_selection = 'round'
+        leader_offset = int(node_parameters.json.get('leader_offset', 1))
         authority_base_ports = [
             int(host['base_port'])
             for host in hosts
@@ -1102,10 +1174,19 @@ class CloudLabBench:
             attack_limit_headers,
             attack_limit_certificates,
             authority_base_ports=authority_base_ports,
+            leader_selection=leader_selection,
+            leader_offset=leader_offset,
         )
         committee.print(PathMaker.committee_file())
         
         node_parameters.print(PathMaker.parameters_file())  # 改为 print() 而不是 save()
+
+        identity_mapping = None
+        if identity_dir is not None:
+            identity_mapping = self._write_identity_map(
+                identity_dir, keys, hosts, committee
+            )
+            Print.info(f'Wrote committee identity map to {identity_dir}/identity_map.json')
         
         # Upload files to all hosts
         repo_name = self.settings.repo_name
@@ -1170,7 +1251,8 @@ class CloudLabBench:
                     conn.close()
         except Exception as e:
             raise BenchError('Failed to upload configuration files', e)
-        
+
+        self._last_identity_mapping = identity_mapping
         return committee
     
     def _logs(self, committee, faults, max_workers=1):
@@ -1705,9 +1787,14 @@ SCRIPTEOF'''
                             sigma = node_parameters.json.get('sigma')
                             kappa = node_parameters.json.get('kappa')
                             reference = node_parameters.json.get('reference')
+                            leader_selection = node_parameters.json.get(
+                                'leader_selection', 'round'
+                            )
+                            leader_offset = node_parameters.json.get('leader_offset', 1)
                             run_label = (
                                 f'cloudlab-n{n}-r{rate}-run{run+1}'
                                 f'-s{sigma}-k{kappa}-ref{reference}'
+                                f'-lead{leader_selection}{leader_offset}'
                             )
                             if design_tag:
                                 run_label += f'-tag-{design_tag}'
@@ -1753,6 +1840,10 @@ SCRIPTEOF'''
                                             'attack_group_size',
                                             'attack_limit_headers',
                                             'attack_limit_certificates',
+                                            'leader_selection',
+                                            'leader_offset',
+                                            'reuse_identity',
+                                            'identity_dir',
                                             'enable_adaptive_intermediate_spill',
                                             'adaptive_intermediate_spill_trigger_digests',
                                             'adaptive_intermediate_spill_cap_digests',
@@ -1761,6 +1852,9 @@ SCRIPTEOF'''
                                             'load_tag',
                                         )
                                     },
+                                    'identity_mapping': getattr(
+                                        self, '_last_identity_mapping', None
+                                    ),
                                 },
                                 run_dir=run_dir,
                             )

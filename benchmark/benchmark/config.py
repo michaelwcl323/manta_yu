@@ -50,7 +50,9 @@ class Committee:
                  attack_start_secs=0, attack_duration_secs=0, attack_group_size=0,
                  attack_limit_headers=False,
                  attack_limit_certificates=True,
-                 authority_base_ports=None):
+                 authority_base_ports=None,
+                 leader_selection='round',
+                 leader_offset=1):
         ''' The `addresses` field looks as follows:
             { 
                 "name": ["host", "host", ...],
@@ -90,6 +92,8 @@ class Committee:
             'attack_group_size': attack_group_size,
             'attack_limit_headers': attack_limit_headers,
             'attack_limit_certificates': attack_limit_certificates,
+            'leader_selection': leader_selection,
+            'leader_offset': int(leader_offset),
         }
         for i, (name, hosts) in enumerate(addresses.items()):
             if authority_base_ports is not None:
@@ -251,7 +255,15 @@ class NodeParameters:
             'attack_start_secs',
             'attack_duration_secs',
             'attack_group_size',
+            'leader_offset',
         ]
+        if 'leader_selection' in json:
+            mode = str(json['leader_selection']).strip().lower()
+            if mode not in ('round', 'wave'):
+                raise ConfigError(
+                    'Invalid leader_selection: use "round" or "wave"'
+                )
+            json['leader_selection'] = mode
         for field in optional_int_fields:
             if field in json and not isinstance(json[field], int):
                 raise ConfigError(f'Invalid parameters type for {field}')
