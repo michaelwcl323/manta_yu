@@ -14,11 +14,12 @@ const MAX_GENERATED_SUPPORT: usize = 6;
 
 /// Receiver-side visibility attack against one wave leader at a time.
 ///
-/// Observation-layer support certificates are stored but not delivered to the
-/// proposer/consensus until the layer's generated-support count is known:
-/// - 4..=6 supporters: deliver the 3 lowest-index supporters immediately,
-///   hold the rest for `delay`.
-/// - otherwise: deliver every observation-layer certificate immediately.
+/// Observation-layer support certificates:
+/// - the 3 lowest-index *known* supporters are delivered immediately so coverage
+///   can advance and commit checks see at most those 3;
+/// - further supporters are parked until the generated count is known;
+/// - 4..=6 generated supporters: extras stay held for `delay`;
+/// - otherwise extras are released immediately.
 ///
 /// Next-layer certificates are never held. When that layer shows `coverage`
 /// distinct supporters, the candidate is released.
@@ -194,8 +195,21 @@ impl SupportVisibilityGate {
             return VisibilityAction::Deliver;
         }
 
+        let supporters = Self::generated_supporters(layer);
+        if Self::is_immediate_supporter(committee, &certificate.origin(), &supporters) {
+            return VisibilityAction::Deliver;
+        }
+
         let author = certificate.origin();
         layer.deferred.insert(author, certificate.clone());
+        info!(
+            "SUPPORT_VISIBILITY hold leader_round={} author_index={:?} generated_support={} immediate={} delay_ms={}",
+            leader_round,
+            committee.authority_index(&author),
+            supporters.len(),
+            MAX_IMMEDIATE_SUPPORT,
+            delay.as_millis()
+        );
         VisibilityAction::Park
     }
 
