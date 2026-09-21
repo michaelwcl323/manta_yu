@@ -960,9 +960,20 @@ leader_digest(cert)= {:?} -> {:?} (node_id={})",
         true
     }
 
+    /// A round has a leader only when it is a solid-wave boundary:
+    /// `leader_round = 1 + wave_index * sigma * kappa`.
+    fn is_leader_round(&self, round: Round) -> bool {
+        let wave = self.committee.solid_wave_length();
+        wave > 0 && round >= 1 && (round - 1) % wave == 0
+    }
+
     /// Returns the certificate (and the certificate's digest) originated by the leader of the
-    /// specified round (if any).
+    /// specified round (if any). Rounds that are not `1 + wave_index * sigma * kappa` have no leader.
     fn leader<'a>(&self, round: Round, dag: &'a Dag) -> Option<&'a (Digest, Certificate)> {
+        if !self.is_leader_round(round) {
+            return None;
+        }
+
         // TODO: We should elect the leader of round r-2 using the common coin revealed at round r.
         // At this stage, we are guaranteed to have 2f+1 certificates from round r (which is enough to
         // compute the coin). We currently just use round-robin.
